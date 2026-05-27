@@ -426,16 +426,16 @@ class AnimeVietsubExtractor(
                   .then(function (html) {
                     console.log('AVS: playerPage html length: ' + html.length);
                     try { iframe.remove(); } catch (e) {}
-                    var tokenMatch = html.match(/const\\s+avsToken\\s*=\\s*\"([^\"]+)\"/);
-                    var hashMatch = playerUrl.match(/\\/player\\/([0-9a-f]+)/);
+                    var tokenMatch = html.match(/const\s+avsToken\s*=\s*"([^"]+)"/);
+                    var hashMatch = playerUrl.match(/\/player\/([0-9a-f]+)/);
                     console.log('AVS: tokenMatch=' + !!tokenMatch + ' hashMatch=' + !!hashMatch);
                     if (!tokenMatch || !hashMatch) return false;
 
                     var avsToken = tokenMatch[1];
                     console.log('AVS: token=' + avsToken.substring(0,20) + '... hash=' + hashMatch[1]);
                     var videoHash = hashMatch[1];
-                    var baseUrl = playerUrl.match(/^(https?:\\/\\/[^/]+)/)[1];
-                    var loaderUrlMatch = html.match(/<script[^>]+src=\"([^\"]*avs-loader\\.min\\.js[^\"]*)\"/);
+                    var baseUrl = playerUrl.match(/^(https?:\/\/[^/]+)/)[1];
+                    var loaderUrlMatch = html.match(/<script[^>]+src="([^"]*avs-loader\.min\.js[^"]*)"/);
                     var loaderUrl = loaderUrlMatch
                       ? loaderUrlMatch[1]
                       : 'https://storage.googleapiscdn.com/static/avs-loader.min.js?v=1.3.7';
