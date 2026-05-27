@@ -52,7 +52,7 @@ class AnimeVietsubExtractor(
 
     private fun ensureProxyRunning(): SegmentProxyServer {
         segmentProxy?.let { if (!it.isClosed) return it }
-        val proxy = SegmentProxyServer(client)
+        val proxy = SegmentProxyServer(client, headers)
         proxy.start()
         segmentProxy = proxy
         return proxy
@@ -455,7 +455,7 @@ class AnimeVietsubExtractor(
 
     // Local HTTP server that serves the decrypted m3u8 playlist and
     // proxies segment requests with PNG-header stripping so mpv can play.
-    private class SegmentProxyServer(private val httpClient: OkHttpClient) {
+    private class SegmentProxyServer(private val httpClient: OkHttpClient, private val headers: Headers) {
         private var serverSocket: ServerSocket? = null
 
         @Volatile var cachedPlaylist: String? = null
@@ -496,7 +496,14 @@ class AnimeVietsubExtractor(
 
                 when {
                     path == "/playlist.m3u8" -> servePlaylist(output)
-                    path.startsWith("/seg?u=") -> serveSegment(path, output)
+                    path.startsWith("/seg?u=") -> {
+                        try {
+                            serveSegment(path, output)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Proxy serveSegment error", e)
+                            writeHttp(output, 502, "text/plain", "Segment fetch error: ${e.message}".toByteArray())
+                        }
+                    }
                     else -> serve404(output)
                 }
             } catch (e: Exception) {
@@ -515,14 +522,30 @@ class AnimeVietsubExtractor(
 
         private fun serveSegment(path: String, output: OutputStream) {
             val url = URLDecoder.decode(path.substringAfter("u="), "UTF-8")
-            val request = Request.Builder().url(url).build()
-            val response = httpClient.newCall(request).execute()
+            Log.e(TAG, "Proxy serveSegment: $url")
+            val reqBuilder = Request.Builder().url(url)
+            // Add headers so the CDN accepts the request
+            headers.names().forEach { name ->
+                if (!name.equals("Host", ignoreCase = true)) {
+                    headers[name]?.let { reqBuilder.header(name, it) }
+                }
+            }
+            reqBuilder.header("Referer", "https://stream.googleapiscdn.com/")
+            // Include cookies from CookieManager
+            val cookies = CookieManager.getInstance().getCookie(url)
+            if (!cookies.isNullOrBlank()) {
+                reqBuilder.header("Cookie", cookies)
+            }
+            val response = httpClient.newCall(reqBuilder.build()).execute()
+            Log.e(TAG, "Proxy segment response: ${response.code}, size=${response.body.contentLength()}")
             val bytes = response.body.bytes()
+            Log.e(TAG, "Proxy segment bytes: ${bytes.size}, isPng=${bytes.size > 4 && isPng(bytes)}")
             val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                 bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
             } else {
                 bytes
             }
+            Log.e(TAG, "Proxy segment result size: ${result.size}")
             writeHttp(output, 200, "video/mp2t", result)
         }
 
