@@ -11,7 +11,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Video
 import okhttp3.Headers
@@ -45,7 +44,6 @@ class AnimeVietsubExtractor(
     private val context: Application by injectLazy()
     private val handler by lazy { Handler(Looper.getMainLooper()) }
 
-    // Client with PNG-stripping interceptor for HLS playlist/segment fetching
     private val hlsClient by lazy {
         client.newBuilder()
             .addInterceptor(PngStripInterceptor())
@@ -80,7 +78,6 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDecrypted(masterUrl: String, playlistText: String) {
-            Log.e(TAG, "onDecrypted: url=$masterUrl, text=${playlistText.take(200)}")
             decryptedMasterUrl = masterUrl
             decryptedMaster = playlistText
             latch.countDown()
@@ -88,7 +85,6 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDirectM3u8(url: String) {
-            Log.e(TAG, "onDirectM3u8: $url")
             synchronized(directM3u8Urls) {
                 directM3u8Urls.add(url)
             }
@@ -97,7 +93,6 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDone() {
-            Log.e(TAG, "onDone: decrypted=${decryptedMaster != null}, directUrls=${directM3u8Urls.size}")
             latch.countDown()
         }
 
@@ -133,7 +128,7 @@ class AnimeVietsubExtractor(
             newView.addJavascriptInterface(jsBridge, JS_BRIDGE_NAME)
             newView.webChromeClient = object : android.webkit.WebChromeClient() {
                 override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
-                    msg?.let { Log.e(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
+                    msg?.let { Log.d(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
                     return true
                 }
             }
@@ -144,24 +139,17 @@ class AnimeVietsubExtractor(
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
 
-                    // Capture m3u8 URLs from network traffic (skip encrypted googleapiscdn ones)
                     if (M3U8_REGEX.containsMatchIn(url) && !url.contains("googleapiscdn.com")) {
-                        Log.e(TAG, "Captured m3u8: $url")
                         synchronized(capturedM3u8) {
                             if (capturedM3u8.add(url)) latch.countDown()
                         }
                     }
 
-                    // Proxy requests to googleapiscdn.com
                     if (url.contains("googleapiscdn.com")) {
-                        // Player page navigation: proxy HTML and inject capture script
                         if (isNavigationRequest(request) && url.contains("/player/")) {
-                            Log.e(TAG, "Proxying player page: $url")
                             return proxyPlayerPage(url, request)
                         }
-                        // Non-navigation: proxy with CORS headers for JS fetch
                         if (!isNavigationRequest(request)) {
-                            Log.e(TAG, "Proxying googleapiscdn: $url")
                             return proxyWithCors(url, request)
                         }
                     }
@@ -171,7 +159,6 @@ class AnimeVietsubExtractor(
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     if (url == null) return
-                    Log.e(TAG, "onPageFinished: $url")
                     view?.evaluateJavascript(DECRYPT_SCRIPT_TEMPLATE.replace("__BRIDGE__", JS_BRIDGE_NAME), null)
                 }
             }
@@ -180,7 +167,6 @@ class AnimeVietsubExtractor(
         }
 
         val latchResult = latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
-        Log.e(TAG, "Latch result: $latchResult (true=signaled, false=timeout)")
 
         handler.post {
             webView?.stopLoading()
@@ -193,26 +179,17 @@ class AnimeVietsubExtractor(
         val directUrls = jsBridge.directUrls()
         val captured = synchronized(capturedM3u8) { capturedM3u8.toList() }
 
-        val debugMsg = "latch=$latchResult, decrypted=${decryptedMaster != null}, " +
-            "directUrls=${directUrls.size}, captured=${captured.size}"
-        Log.e(TAG, debugMsg)
-        handler.post { Toast.makeText(context, "AVS: $debugMsg", Toast.LENGTH_LONG).show() }
 
         if (decryptedMaster != null && decryptedMasterUrl != null) {
-            Log.e(TAG, "Decrypted master URL: $decryptedMasterUrl")
-            Log.e(TAG, "Decrypted master text (first 300): ${decryptedMaster.take(300)}")
             try {
                 val proxy = ensureProxyRunning()
                 val rewritten = rewritePlaylistForProxy(decryptedMaster, proxy.port)
                 proxy.cachedPlaylist = rewritten
                 val proxyUrl = "http://127.0.0.1:${proxy.port}/playlist.m3u8"
-                Log.e(TAG, "Serving decrypted m3u8 via local proxy: $proxyUrl")
-                handler.post { Toast.makeText(context, "AVS: proxy on port ${proxy.port}", Toast.LENGTH_SHORT).show() }
                 return listOf(Video(proxyUrl, "AnimeVsub", proxyUrl))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start proxy, falling back to extractFromHls", e)
                 val parsedFromDecrypted = parseDecryptedMasterPlaylist(decryptedMasterUrl, decryptedMaster)
-                Log.e(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
                 if (parsedFromDecrypted.isNotEmpty()) {
                     return parsedFromDecrypted
                 }
@@ -225,11 +202,8 @@ class AnimeVietsubExtractor(
         }.toList()
             .sortedByDescending { url -> MASTER_M3U8_HINT_REGEX.containsMatchIn(url) }
 
-        Log.e(TAG, "Candidate m3u8 URLs: $candidateM3u8Urls")
-
         if (candidateM3u8Urls.isEmpty()) {
-            Log.e(TAG, "No video URLs found!")
-            handler.post { Toast.makeText(context, "AVS: No video URLs found", Toast.LENGTH_LONG).show() }
+            Log.e(TAG, "No video URLs found")
             return emptyList()
         }
 
@@ -304,38 +278,28 @@ class AnimeVietsubExtractor(
         return baseUrl.toHttpUrl().resolve(candidate)?.toString() ?: candidate
     }
 
-    // Distinguish navigation requests (iframe loads) from JS fetch calls.
-    // Navigation: Accept contains "text/html" and doesn't start with wildcard
-    // JS fetch: Accept is wildcard or absent
     private fun isNavigationRequest(request: WebResourceRequest): Boolean {
         val accept = request.requestHeaders?.get("Accept") ?: return false
         return accept.contains("text/html") && !accept.startsWith("*/*")
     }
 
-    // Proxy a request through OkHttp and inject CORS-permissive headers
-    // so the WebView allows JS to read the cross-origin response.
     private fun proxyWithCors(url: String, request: WebResourceRequest): WebResourceResponse? = try {
         val reqBuilder = Request.Builder().url(url)
 
-        // Copy request headers from WebView
         request.requestHeaders?.forEach { (key, value) ->
             if (!key.equals("Accept-Encoding", ignoreCase = true)) {
                 reqBuilder.header(key, value)
             }
         }
 
-        // Include cookies from WebView CookieManager (CF clearance, etc.)
         val cookies = CookieManager.getInstance().getCookie(url)
         if (!cookies.isNullOrBlank()) {
             reqBuilder.header("Cookie", cookies)
         }
 
         val response = client.newCall(reqBuilder.build()).execute()
-        Log.e(TAG, "Proxy response: ${response.code} for $url")
         val body = response.body.bytes()
-        Log.e(TAG, "Proxy body size: ${body.size} bytes")
 
-        // Sync Set-Cookie from response back to CookieManager
         response.headers("Set-Cookie").forEach { cookie ->
             CookieManager.getInstance().setCookie(url, cookie)
         }
@@ -348,8 +312,6 @@ class AnimeVietsubExtractor(
             "UTF-8"
         }
 
-        // Build response headers with CORS permissions
-        // Skip existing CORS headers to avoid duplicates (case-sensitive map keys)
         val corsHeaders = setOf("access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "access-control-allow-credentials", "access-control-expose-headers")
         val responseHeaders = mutableMapOf<String, String>()
         response.headers.names().forEach { name ->
@@ -375,9 +337,6 @@ class AnimeVietsubExtractor(
         null
     }
 
-    // Proxy the player page HTML and inject a capture script that uses
-    // the site's own _avsDecryptM3u8 to decrypt the playlist, then
-    // posts the result back to the parent page via postMessage.
     private fun proxyPlayerPage(url: String, request: WebResourceRequest): WebResourceResponse? = try {
         val reqBuilder = Request.Builder().url(url)
         request.requestHeaders?.forEach { (key, value) ->
@@ -389,16 +348,12 @@ class AnimeVietsubExtractor(
         if (!cookies.isNullOrBlank()) reqBuilder.header("Cookie", cookies)
 
         val response = client.newCall(reqBuilder.build()).execute()
-        Log.e(TAG, "Player page response: ${response.code} for $url")
-
         var html = response.body.string()
-        Log.e(TAG, "Player page HTML size: ${html.length}")
 
         response.headers("Set-Cookie").forEach { cookie ->
             CookieManager.getInstance().setCookie(url, cookie)
         }
 
-        // Inject capture script before </body>
         html = html.replace("</body>", "$PLAYER_CAPTURE_SCRIPT</body>")
 
         val bodyBytes = html.toByteArray(Charsets.UTF_8)
@@ -418,17 +373,12 @@ class AnimeVietsubExtractor(
         null
     }
 
-    // OkHttp interceptor that strips the 127-byte PNG prefix from responses
-    // whose body starts with PNG magic bytes (0x89504E47).
-    // AnimeVietsub disguises HLS segments as PNG files.
     private class PngStripInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val response = chain.proceed(chain.request())
             val body = response.body
             val contentType = response.header("Content-Type") ?: ""
 
-            // Only process responses that could be disguised segments
-            // Skip known text types (playlists, HTML, JSON)
             if (contentType.startsWith("text/") ||
                 contentType.contains("json") ||
                 contentType.contains("mpegurl")
@@ -443,7 +393,6 @@ class AnimeVietsubExtractor(
                 return response.newBuilder().body(newBody).build()
             }
 
-            // Not PNG-wrapped, return original bytes as-is
             val newBody = bytes.toResponseBody(body.contentType())
             return response.newBuilder().body(newBody).build()
         }
@@ -458,8 +407,6 @@ class AnimeVietsubExtractor(
             bytes[7] == 0x0A.toByte()
     }
 
-    // Local HTTP server that serves the decrypted m3u8 playlist and
-    // proxies segment requests with PNG-header stripping so mpv can play.
     private class SegmentProxyServer(private val httpClient: OkHttpClient, private val headers: Headers) {
         private var serverSocket: ServerSocket? = null
 
@@ -528,84 +475,60 @@ class AnimeVietsubExtractor(
         private fun serveSegment(path: String, output: OutputStream) {
             val encodedUrl = path.substringAfter("u=")
             val url = URLDecoder.decode(encodedUrl, "UTF-8")
-            Log.e(TAG, "Proxy serveSegment: $url")
 
-            // Layer 2: Decrypt the real CDN URL from the 'e' parameter
             val realUrl = decryptSegmentUrl(url)
-            Log.e(TAG, "Proxy realUrl: $realUrl")
 
             val reqBuilder = Request.Builder().url(realUrl)
-            // Add headers so the CDN accepts the request
             headers.names().forEach { name ->
                 if (!name.equals("Host", ignoreCase = true)) {
                     headers[name]?.let { reqBuilder.header(name, it) }
                 }
             }
             reqBuilder.header("Referer", "https://stream.googleapiscdn.com/")
-            // Include cookies from CookieManager
             val cookies = CookieManager.getInstance().getCookie(realUrl)
             if (!cookies.isNullOrBlank()) {
                 reqBuilder.header("Cookie", cookies)
             }
             val response = httpClient.newCall(reqBuilder.build()).execute()
-            Log.e(TAG, "Proxy segment response: ${response.code}, size=${response.body.contentLength()}")
             val bytes = response.body.bytes()
-            Log.e(TAG, "Proxy segment bytes: ${bytes.size}, isPng=${bytes.size > 4 && isPng(bytes)}")
             val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                 bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
             } else {
                 bytes
             }
-            Log.e(TAG, "Proxy segment result size: ${result.size}")
             writeHttp(output, 200, "video/mp2t", result)
         }
 
-        /**
-         * Layer 2 decryption: AES-CTR decrypt the 'e' parameter to get the real CDN URL.
-         * Algorithm:
-         * 1. Extract fileId (24-hex from path), e (base64url encrypted URL), i (index), token (JWT)
-         * 2. Decode JWT payload to get jti (128 hex chars)
-         * 3. jtiOdd = every odd-indexed char from jti (64 chars)
-         * 4. key = HMAC-SHA256(key=jtiOdd.utf8, data="url-cipher|"+fileId)
-         * 5. counter = 16 bytes, segment index in bytes 12-15 (big-endian)
-         * 6. AES-CTR decrypt(key, counter, base64url_decode(e)) → real URL
-         */
+        // Layer 2: AES-CTR decrypt 'e' param → real CDN URL
         private fun decryptSegmentUrl(url: String): String {
             val httpUrl = url.toHttpUrl()
             val pathSegments = httpUrl.pathSegments
-            // fileId from /hls/{fileId}.ts
             val tsFile = pathSegments.last()
             val fileId = tsFile.substringBefore(".ts")
             val eParam = httpUrl.queryParameter("e") ?: error("Missing 'e' param")
             val iParam = httpUrl.queryParameter("i")?.toIntOrNull() ?: 0
             val token = httpUrl.queryParameter("token") ?: error("Missing 'token' param")
 
-            // Decode JWT payload (second part, base64url encoded)
             val jwtParts = token.split(".")
             val payloadJson = String(base64UrlDecode(jwtParts[1]), Charsets.UTF_8)
             val jti = JSONObject(payloadJson).getString("jti")
-            Log.e(TAG, "Layer2: fileId=$fileId, i=$iParam, jti length=${jti.length}")
 
-            // jtiOdd = every character at odd indices (1, 3, 5, ...)
             val jtiOdd = buildString {
                 for (idx in jti.indices) {
                     if (idx % 2 == 1) append(jti[idx])
                 }
             }
 
-            // AES-CTR key = HMAC-SHA256(key=jtiOdd.utf8, data="url-cipher|"+fileId)
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(jtiOdd.toByteArray(Charsets.UTF_8), "HmacSHA256"))
             val aesKey = mac.doFinal("url-cipher|$fileId".toByteArray(Charsets.UTF_8))
 
-            // Counter: 16 bytes, segment index in bytes 12-15 (big-endian)
             val counter = ByteArray(16)
             counter[12] = (iParam shr 24 and 0xFF).toByte()
             counter[13] = (iParam shr 16 and 0xFF).toByte()
             counter[14] = (iParam shr 8 and 0xFF).toByte()
             counter[15] = (iParam and 0xFF).toByte()
 
-            // AES-CTR decrypt
             val cipher = Cipher.getInstance("AES/CTR/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(counter))
             val decrypted = cipher.doFinal(base64UrlDecode(eParam))
@@ -613,7 +536,6 @@ class AnimeVietsubExtractor(
         }
 
         private fun base64UrlDecode(input: String): ByteArray {
-            // Replace base64url chars with standard base64, add padding
             val base64 = input.replace('-', '+').replace('_', '/')
             val padded = when (base64.length % 4) {
                 2 -> "$base64=="
