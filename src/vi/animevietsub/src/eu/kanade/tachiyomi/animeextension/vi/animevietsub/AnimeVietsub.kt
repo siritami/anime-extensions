@@ -173,7 +173,7 @@ class AnimeVietsub :
     private fun parseAnimePage(response: Response, paged: Boolean): AnimesPage {
         val document = response.asJsoup()
 
-        val animes = document.select("main .TPostMv, main .TPost")
+        val animes = document.select("main .TPostMv:has(a[href]):has(.Title), main .TPost:has(a[href]):has(.Title)")
             .map { it.toAnime() }
             .distinctBy { it.url }
 

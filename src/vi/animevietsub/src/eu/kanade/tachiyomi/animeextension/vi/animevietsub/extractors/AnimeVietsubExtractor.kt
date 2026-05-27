@@ -36,6 +36,7 @@ class AnimeVietsubExtractor(
         fun onDecrypted(masterUrl: String, playlistText: String) {
             decryptedMasterUrl = masterUrl
             decryptedMaster = playlistText
+            latch.countDown()
         }
 
         @JavascriptInterface
@@ -43,11 +44,14 @@ class AnimeVietsubExtractor(
             synchronized(directM3u8Urls) {
                 directM3u8Urls.add(url)
             }
+            latch.countDown()
         }
 
         @JavascriptInterface
         fun onDone() {
-            latch.countDown()
+            if (decryptedMaster != null || directM3u8Urls.isNotEmpty()) {
+                latch.countDown()
+            }
         }
 
         fun directUrls(): List<String> = synchronized(directM3u8Urls) { directM3u8Urls.toList() }
@@ -87,8 +91,12 @@ class AnimeVietsubExtractor(
                 ): WebResourceResponse? {
                     val url = request?.url.toString()
                     if (M3U8_REGEX.containsMatchIn(url)) {
+                        var hasNewUrl = false
                         synchronized(capturedM3u8) {
-                            capturedM3u8.add(url)
+                            hasNewUrl = capturedM3u8.add(url)
+                        }
+                        if (hasNewUrl) {
+                            latch.countDown()
                         }
                     }
                     return super.shouldInterceptRequest(view, request)
