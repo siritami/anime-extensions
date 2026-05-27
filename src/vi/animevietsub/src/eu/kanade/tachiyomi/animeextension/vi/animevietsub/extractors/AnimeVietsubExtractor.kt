@@ -58,15 +58,14 @@ class AnimeVietsubExtractor(
         return proxy
     }
 
-    private fun rewritePlaylistForProxy(m3u8: String, port: Int): String =
-        m3u8.lines().joinToString("\n") { line ->
-            val trimmed = line.trim()
-            if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
-                "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
-            } else {
-                line
-            }
+    private fun rewritePlaylistForProxy(m3u8: String, port: Int): String = m3u8.lines().joinToString("\n") { line ->
+        val trimmed = line.trim()
+        if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
+            "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
+        } else {
+            line
         }
+    }
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var decryptedMaster: String? = null
@@ -458,6 +457,7 @@ class AnimeVietsubExtractor(
     // proxies segment requests with PNG-header stripping so mpv can play.
     private class SegmentProxyServer(private val httpClient: OkHttpClient) {
         private var serverSocket: ServerSocket? = null
+
         @Volatile var cachedPlaylist: String? = null
         val port: Int get() = serverSocket?.localPort ?: 0
         val isClosed: Boolean get() = serverSocket?.isClosed != false
@@ -478,7 +478,9 @@ class AnimeVietsubExtractor(
         }
 
         fun stop() {
-            try { serverSocket?.close() } catch (_: Exception) {}
+            try {
+                serverSocket?.close()
+            } catch (_: Exception) {}
             serverSocket = null
         }
 
@@ -500,7 +502,9 @@ class AnimeVietsubExtractor(
             } catch (e: Exception) {
                 Log.e(TAG, "Proxy connection error", e)
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                try {
+                    socket.close()
+                } catch (_: Exception) {}
             }
         }
 
@@ -538,9 +542,8 @@ class AnimeVietsubExtractor(
             output.flush()
         }
 
-        private fun isPng(bytes: ByteArray): Boolean =
-            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
-                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+        private fun isPng(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
     }
 
     companion object {
