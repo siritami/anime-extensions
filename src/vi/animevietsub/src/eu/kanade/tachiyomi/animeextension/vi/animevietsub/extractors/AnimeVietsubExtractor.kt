@@ -235,59 +235,57 @@ class AnimeVietsubExtractor(
 
     // Proxy a request through OkHttp and inject CORS-permissive headers
     // so the WebView allows JS to read the cross-origin response.
-    private fun proxyWithCors(url: String, request: WebResourceRequest): WebResourceResponse? {
-        return try {
-            val reqBuilder = Request.Builder().url(url)
+    private fun proxyWithCors(url: String, request: WebResourceRequest): WebResourceResponse? = try {
+        val reqBuilder = Request.Builder().url(url)
 
-            // Copy request headers from WebView
-            request.requestHeaders?.forEach { (key, value) ->
-                if (!key.equals("Accept-Encoding", ignoreCase = true)) {
-                    reqBuilder.header(key, value)
-                }
+        // Copy request headers from WebView
+        request.requestHeaders?.forEach { (key, value) ->
+            if (!key.equals("Accept-Encoding", ignoreCase = true)) {
+                reqBuilder.header(key, value)
             }
-
-            // Include cookies from WebView CookieManager (CF clearance, etc.)
-            val cookies = CookieManager.getInstance().getCookie(url)
-            if (!cookies.isNullOrBlank()) {
-                reqBuilder.header("Cookie", cookies)
-            }
-
-            val response = client.newCall(reqBuilder.build()).execute()
-            val body = response.body?.bytes() ?: ByteArray(0)
-
-            // Sync Set-Cookie from response back to CookieManager
-            response.headers("Set-Cookie").forEach { cookie ->
-                CookieManager.getInstance().setCookie(url, cookie)
-            }
-
-            val contentType = response.header("Content-Type") ?: "application/octet-stream"
-            val mimeType = contentType.substringBefore(";").trim()
-            val charset = if (contentType.contains("charset=")) {
-                contentType.substringAfter("charset=").substringBefore(";").trim()
-            } else {
-                "UTF-8"
-            }
-
-            // Build response headers with CORS permissions
-            val responseHeaders = mutableMapOf<String, String>()
-            response.headers.names().forEach { name ->
-                response.header(name)?.let { responseHeaders[name] = it }
-            }
-            responseHeaders["Access-Control-Allow-Origin"] = "*"
-            responseHeaders["Access-Control-Allow-Headers"] = "*"
-            responseHeaders["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-
-            WebResourceResponse(
-                mimeType,
-                charset,
-                response.code,
-                response.message.ifEmpty { "OK" },
-                responseHeaders,
-                ByteArrayInputStream(body),
-            )
-        } catch (e: Exception) {
-            null
         }
+
+        // Include cookies from WebView CookieManager (CF clearance, etc.)
+        val cookies = CookieManager.getInstance().getCookie(url)
+        if (!cookies.isNullOrBlank()) {
+            reqBuilder.header("Cookie", cookies)
+        }
+
+        val response = client.newCall(reqBuilder.build()).execute()
+        val body = response.body?.bytes() ?: ByteArray(0)
+
+        // Sync Set-Cookie from response back to CookieManager
+        response.headers("Set-Cookie").forEach { cookie ->
+            CookieManager.getInstance().setCookie(url, cookie)
+        }
+
+        val contentType = response.header("Content-Type") ?: "application/octet-stream"
+        val mimeType = contentType.substringBefore(";").trim()
+        val charset = if (contentType.contains("charset=")) {
+            contentType.substringAfter("charset=").substringBefore(";").trim()
+        } else {
+            "UTF-8"
+        }
+
+        // Build response headers with CORS permissions
+        val responseHeaders = mutableMapOf<String, String>()
+        response.headers.names().forEach { name ->
+            response.header(name)?.let { responseHeaders[name] = it }
+        }
+        responseHeaders["Access-Control-Allow-Origin"] = "*"
+        responseHeaders["Access-Control-Allow-Headers"] = "*"
+        responseHeaders["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+
+        WebResourceResponse(
+            mimeType,
+            charset,
+            response.code,
+            response.message.ifEmpty { "OK" },
+            responseHeaders,
+            ByteArrayInputStream(body),
+        )
+    } catch (e: Exception) {
+        null
     }
 
     // OkHttp interceptor that strips the 127-byte PNG prefix from responses
@@ -320,16 +318,14 @@ class AnimeVietsubExtractor(
             return response.newBuilder().body(newBody).build()
         }
 
-        private fun isPngMagic(bytes: ByteArray): Boolean {
-            return bytes[0] == 0x89.toByte() &&
-                bytes[1] == 0x50.toByte() && // P
-                bytes[2] == 0x4E.toByte() && // N
-                bytes[3] == 0x47.toByte() && // G
-                bytes[4] == 0x0D.toByte() &&
-                bytes[5] == 0x0A.toByte() &&
-                bytes[6] == 0x1A.toByte() &&
-                bytes[7] == 0x0A.toByte()
-        }
+        private fun isPngMagic(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() &&
+            bytes[1] == 0x50.toByte() && // P
+            bytes[2] == 0x4E.toByte() && // N
+            bytes[3] == 0x47.toByte() && // G
+            bytes[4] == 0x0D.toByte() &&
+            bytes[5] == 0x0A.toByte() &&
+            bytes[6] == 0x1A.toByte() &&
+            bytes[7] == 0x0A.toByte()
     }
 
     companion object {
