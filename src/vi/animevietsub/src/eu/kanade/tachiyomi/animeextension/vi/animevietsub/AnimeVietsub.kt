@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.animeextension.vi.animevietsub
 
 import android.content.SharedPreferences
 import androidx.preference.EditTextPreference
-import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.vi.animevietsub.extractors.AnimeVietsubExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -47,7 +46,7 @@ class AnimeVietsub :
         }
     }
     private val animeVietsubExtractor by lazy {
-        AnimeVietsubExtractor(client, headers, preferences.getString(VIDEO_MODE_PREF, AnimeVietsubExtractor.MODE_PROXY)!!)
+        AnimeVietsubExtractor(client, headers)
     }
 
     // Strip "wv" from User-Agent so Google login works in this source.
@@ -90,7 +89,7 @@ class AnimeVietsub :
         val selectedPath = selectedFilter?.path
         val url = when {
             selectedPath == null -> buildPagedUrl("anime-moi", page)
-            selectedFilter?.paged == true -> buildPagedUrl(selectedPath, page)
+            selectedFilter.paged -> buildPagedUrl(selectedPath, page)
             else -> buildStaticUrl(selectedPath)
         }
 
@@ -277,15 +276,6 @@ class AnimeVietsub :
     // ============================== Settings ==============================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        ListPreference(screen.context).apply {
-            key = VIDEO_MODE_PREF
-            title = VIDEO_MODE_PREF_TITLE
-            entries = arrayOf("Proxy", "Giải mã")
-            entryValues = arrayOf(AnimeVietsubExtractor.MODE_PROXY, AnimeVietsubExtractor.MODE_DECRYPT)
-            setDefaultValue(AnimeVietsubExtractor.MODE_PROXY)
-            summary = "%s"
-        }.let(screen::addPreference)
-
         EditTextPreference(screen.context).apply {
             key = BASE_URL_PREF
             title = BASE_URL_PREF_TITLE
@@ -299,8 +289,6 @@ class AnimeVietsub :
     private fun getPrefBaseUrl(): String = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
 
     companion object {
-        private const val VIDEO_MODE_PREF = "videoMode"
-        private const val VIDEO_MODE_PREF_TITLE = "Chế độ phát video"
         private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
         private const val BASE_URL_PREF = "overrideBaseUrl"
         private const val BASE_URL_PREF_TITLE = "Ghi đè URL cơ sở"
