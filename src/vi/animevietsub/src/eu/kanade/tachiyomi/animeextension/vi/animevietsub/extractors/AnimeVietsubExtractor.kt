@@ -22,6 +22,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import org.json.JSONObject
 import uy.kohesive.injekt.injectLazy
 import java.io.ByteArrayInputStream
 import java.io.OutputStream
@@ -36,7 +37,6 @@ import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import org.json.JSONObject
 
 class AnimeVietsubExtractor(
     private val client: OkHttpClient,
