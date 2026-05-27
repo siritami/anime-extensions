@@ -28,6 +28,7 @@ class AnimeVietsubExtractor(
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var decryptedMaster: String? = null
+
         @Volatile var decryptedMasterUrl: String? = null
         private val directM3u8Urls = linkedSetOf<String>()
 

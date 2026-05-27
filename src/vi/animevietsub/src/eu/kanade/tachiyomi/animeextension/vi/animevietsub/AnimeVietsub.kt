@@ -211,8 +211,7 @@ class AnimeVietsub :
         return item.text().substringAfter(":", "").ifBlank { null }
     }
 
-    private fun buildPagedUrl(path: String, page: Int): HttpUrl =
-        buildPathUrl(path).newBuilder().addPathSegment("trang-$page.html").build()
+    private fun buildPagedUrl(path: String, page: Int): HttpUrl = buildPathUrl(path).newBuilder().addPathSegment("trang-$page.html").build()
 
     private fun buildStaticUrl(path: String): HttpUrl = buildPathUrl(path)
 
