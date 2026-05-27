@@ -32,6 +32,11 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import org.json.JSONObject
 
 class AnimeVietsubExtractor(
     private val client: OkHttpClient,
@@ -521,9 +526,15 @@ class AnimeVietsubExtractor(
         }
 
         private fun serveSegment(path: String, output: OutputStream) {
-            val url = URLDecoder.decode(path.substringAfter("u="), "UTF-8")
+            val encodedUrl = path.substringAfter("u=")
+            val url = URLDecoder.decode(encodedUrl, "UTF-8")
             Log.e(TAG, "Proxy serveSegment: $url")
-            val reqBuilder = Request.Builder().url(url)
+
+            // Layer 2: Decrypt the real CDN URL from the 'e' parameter
+            val realUrl = decryptSegmentUrl(url)
+            Log.e(TAG, "Proxy realUrl: $realUrl")
+
+            val reqBuilder = Request.Builder().url(realUrl)
             // Add headers so the CDN accepts the request
             headers.names().forEach { name ->
                 if (!name.equals("Host", ignoreCase = true)) {
@@ -532,7 +543,7 @@ class AnimeVietsubExtractor(
             }
             reqBuilder.header("Referer", "https://stream.googleapiscdn.com/")
             // Include cookies from CookieManager
-            val cookies = CookieManager.getInstance().getCookie(url)
+            val cookies = CookieManager.getInstance().getCookie(realUrl)
             if (!cookies.isNullOrBlank()) {
                 reqBuilder.header("Cookie", cookies)
             }
@@ -547,6 +558,69 @@ class AnimeVietsubExtractor(
             }
             Log.e(TAG, "Proxy segment result size: ${result.size}")
             writeHttp(output, 200, "video/mp2t", result)
+        }
+
+        /**
+         * Layer 2 decryption: AES-CTR decrypt the 'e' parameter to get the real CDN URL.
+         * Algorithm:
+         * 1. Extract fileId (24-hex from path), e (base64url encrypted URL), i (index), token (JWT)
+         * 2. Decode JWT payload to get jti (128 hex chars)
+         * 3. jtiOdd = every odd-indexed char from jti (64 chars)
+         * 4. key = HMAC-SHA256(key=jtiOdd.utf8, data="url-cipher|"+fileId)
+         * 5. counter = 16 bytes, segment index in bytes 12-15 (big-endian)
+         * 6. AES-CTR decrypt(key, counter, base64url_decode(e)) → real URL
+         */
+        private fun decryptSegmentUrl(url: String): String {
+            val httpUrl = url.toHttpUrl()
+            val pathSegments = httpUrl.pathSegments
+            // fileId from /hls/{fileId}.ts
+            val tsFile = pathSegments.last()
+            val fileId = tsFile.substringBefore(".ts")
+            val eParam = httpUrl.queryParameter("e") ?: error("Missing 'e' param")
+            val iParam = httpUrl.queryParameter("i")?.toIntOrNull() ?: 0
+            val token = httpUrl.queryParameter("token") ?: error("Missing 'token' param")
+
+            // Decode JWT payload (second part, base64url encoded)
+            val jwtParts = token.split(".")
+            val payloadJson = String(base64UrlDecode(jwtParts[1]), Charsets.UTF_8)
+            val jti = JSONObject(payloadJson).getString("jti")
+            Log.e(TAG, "Layer2: fileId=$fileId, i=$iParam, jti length=${jti.length}")
+
+            // jtiOdd = every character at odd indices (1, 3, 5, ...)
+            val jtiOdd = buildString {
+                for (idx in jti.indices) {
+                    if (idx % 2 == 1) append(jti[idx])
+                }
+            }
+
+            // AES-CTR key = HMAC-SHA256(key=jtiOdd.utf8, data="url-cipher|"+fileId)
+            val mac = Mac.getInstance("HmacSHA256")
+            mac.init(SecretKeySpec(jtiOdd.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+            val aesKey = mac.doFinal("url-cipher|$fileId".toByteArray(Charsets.UTF_8))
+
+            // Counter: 16 bytes, segment index in bytes 12-15 (big-endian)
+            val counter = ByteArray(16)
+            counter[12] = (iParam shr 24 and 0xFF).toByte()
+            counter[13] = (iParam shr 16 and 0xFF).toByte()
+            counter[14] = (iParam shr 8 and 0xFF).toByte()
+            counter[15] = (iParam and 0xFF).toByte()
+
+            // AES-CTR decrypt
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(counter))
+            val decrypted = cipher.doFinal(base64UrlDecode(eParam))
+            return String(decrypted, Charsets.UTF_8)
+        }
+
+        private fun base64UrlDecode(input: String): ByteArray {
+            // Replace base64url chars with standard base64, add padding
+            val base64 = input.replace('-', '+').replace('_', '/')
+            val padded = when (base64.length % 4) {
+                2 -> "$base64=="
+                3 -> "$base64="
+                else -> base64
+            }
+            return android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
         }
 
         private fun serve404(output: OutputStream) {
