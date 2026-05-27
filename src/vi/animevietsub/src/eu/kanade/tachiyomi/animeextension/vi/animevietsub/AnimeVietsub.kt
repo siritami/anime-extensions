@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.animeextension.vi.animevietsub
 
 import android.content.SharedPreferences
 import androidx.preference.EditTextPreference
+import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.vi.animevietsub.extractors.AnimeVietsubExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -45,7 +46,9 @@ class AnimeVietsub :
             }
         }
     }
-    private val animeVietsubExtractor by lazy { AnimeVietsubExtractor(client, headers) }
+    private val animeVietsubExtractor by lazy {
+        AnimeVietsubExtractor(client, headers, preferences.getString(VIDEO_MODE_PREF, AnimeVietsubExtractor.MODE_PROXY)!!)
+    }
 
     // Strip "wv" from User-Agent so Google login works in this source.
     // Google deny login when User-Agent contains the WebView token.
@@ -99,19 +102,37 @@ class AnimeVietsub :
         return parseAnimePage(response, paged)
     }
 
-    override fun getFilterList(): AnimeFilterList = AnimeVietsubFilters.FILTER_LIST
+    @Volatile private var cachedFilterGroups: List<AnimeVietsubFilters.FilterGroup>? = null
+    private var filtersFetchAttempted = false
 
-    // ============================== Settings ==============================
+    override fun getFilterList(): AnimeFilterList {
+        cachedFilterGroups?.let { return AnimeVietsubFilters.buildFilterList(it) }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = BASE_URL_PREF
-            title = BASE_URL_PREF_TITLE
-            summary = BASE_URL_PREF_SUMMARY
-            setDefaultValue(defaultBaseUrl)
-            dialogTitle = BASE_URL_PREF_TITLE
-            dialogMessage = "Default: $defaultBaseUrl"
-        }.let(screen::addPreference)
+        if (!filtersFetchAttempted) {
+            filtersFetchAttempted = true
+            kotlin.concurrent.thread {
+                try {
+                    cachedFilterGroups = fetchFilterGroups()
+                } catch (_: Exception) {}
+            }
+        }
+
+        return AnimeVietsubFilters.buildFilterList(emptyList())
+    }
+
+    private fun fetchFilterGroups(): List<AnimeVietsubFilters.FilterGroup> {
+        val doc = client.newCall(GET(baseUrl, headers)).execute().asJsoup()
+        val nav = doc.selectFirst("nav.Menu") ?: return emptyList()
+
+        return nav.select("li.menu-item-has-children").map { li ->
+            val title = li.selectFirst("> a")?.text()?.trim() ?: ""
+            val options = li.select("ul.sub-menu li a").map { a ->
+                val path = a.absUrl("href").toHttpUrl().encodedPath.trim('/')
+                val paged = !path.endsWith(".html")
+                AnimeVietsubFilters.FilterOption(a.text().trim(), path, paged)
+            }
+            AnimeVietsubFilters.FilterGroup(title, options)
+        }
     }
 
     // ============================== Details ===============================
@@ -138,6 +159,11 @@ class AnimeVietsub :
         }
     }
 
+    private fun Document.infoValue(label: String): String? {
+        val item = selectFirst(".InfoList li:has(strong:contains($label))") ?: return null
+        return item.text().substringAfter(":", "").ifBlank { null }
+    }
+
     // ============================== Episodes ==============================
 
     override fun episodeListParse(response: Response): List<SEpisode> {
@@ -162,6 +188,26 @@ class AnimeVietsub :
             .toDisplayOrder()
     }
 
+    private fun Element.toEpisode(): SEpisode {
+        val label = text()
+        val episodeUrl = absUrl("href")
+
+        return SEpisode.create().apply {
+            setUrlWithoutDomain(episodeUrl)
+            name = label
+            episode_number = EPISODE_NUMBER_REGEX.find(label)?.groupValues?.get(1)?.toFloatOrNull() ?: 0F
+        }
+    }
+
+    private fun List<SEpisode>.toDisplayOrder(): List<SEpisode> {
+        if (size < 2) return this
+
+        val firstNumber = first().episode_number
+        val lastNumber = last().episode_number
+
+        return if (firstNumber < lastNumber) reversed() else this
+    }
+
     // ============================== Pages =================================
 
     override fun videoListParse(response: Response): List<Video> {
@@ -170,11 +216,17 @@ class AnimeVietsub :
         return animeVietsubExtractor.videosFromEpisodeUrl(episodeUrl)
     }
 
+    // ============================== Parsing ===============================
+
     private fun parseAnimePage(response: Response, paged: Boolean): AnimesPage {
         val document = response.asJsoup()
 
         val animes = document.select("main .TPostMv:has(a[href]):has(.Title), main .TPost:has(a[href]):has(.Title)")
             .map { it.toAnime() }
+            .ifEmpty {
+                document.select("ul.bxh-movie-phimletv > li:has(.e-item a[href])")
+                    .map { it.toRankingAnime() }
+            }
             .distinctBy { it.url }
 
         val currentPage = PAGE_NUMBER_REGEX.find(response.request.url.toString())?.groupValues?.get(1)?.toIntOrNull() ?: 1
@@ -195,21 +247,22 @@ class AnimeVietsub :
         }
     }
 
-    private fun Element.toEpisode(): SEpisode {
-        val label = text()
-        val episodeUrl = absUrl("href")
+    private fun Element.toRankingAnime(): SAnime {
+        val anchor = selectFirst(".e-item a[href]")!!
+        val titleAttr = anchor.attr("title")
+            .removePrefix("Phim ")
+            .substringBefore(" - ")
+            .trim()
 
-        return SEpisode.create().apply {
-            setUrlWithoutDomain(episodeUrl)
-            name = label
-            episode_number = EPISODE_NUMBER_REGEX.find(label)?.groupValues?.get(1)?.toFloatOrNull() ?: 0F
+        return SAnime.create().apply {
+            setUrlWithoutDomain(anchor.absUrl("href"))
+            title = titleAttr
+            thumbnail_url = selectFirst("img")?.absUrl("src")
+                ?.ifEmpty { selectFirst("img")?.absUrl("data-src") }
         }
     }
 
-    private fun Document.infoValue(label: String): String? {
-        val item = selectFirst(".InfoList li:has(strong:contains($label))") ?: return null
-        return item.text().substringAfter(":", "").ifBlank { null }
-    }
+    // ============================== Utilities =============================
 
     private fun buildPagedUrl(path: String, page: Int): HttpUrl = buildPathUrl(path).newBuilder().addPathSegment("trang-$page.html").build()
 
@@ -221,18 +274,33 @@ class AnimeVietsub :
         return builder.build()
     }
 
-    private fun getPrefBaseUrl(): String = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
+    // ============================== Settings ==============================
 
-    private fun List<SEpisode>.toDisplayOrder(): List<SEpisode> {
-        if (size < 2) return this
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        ListPreference(screen.context).apply {
+            key = VIDEO_MODE_PREF
+            title = VIDEO_MODE_PREF_TITLE
+            entries = arrayOf("Proxy", "Giải mã")
+            entryValues = arrayOf(AnimeVietsubExtractor.MODE_PROXY, AnimeVietsubExtractor.MODE_DECRYPT)
+            setDefaultValue(AnimeVietsubExtractor.MODE_PROXY)
+            summary = "%s"
+        }.let(screen::addPreference)
 
-        val firstNumber = first().episode_number
-        val lastNumber = last().episode_number
-
-        return if (firstNumber < lastNumber) reversed() else this
+        EditTextPreference(screen.context).apply {
+            key = BASE_URL_PREF
+            title = BASE_URL_PREF_TITLE
+            summary = BASE_URL_PREF_SUMMARY
+            setDefaultValue(defaultBaseUrl)
+            dialogTitle = BASE_URL_PREF_TITLE
+            dialogMessage = "Default: $defaultBaseUrl"
+        }.let(screen::addPreference)
     }
 
+    private fun getPrefBaseUrl(): String = preferences.getString(BASE_URL_PREF, defaultBaseUrl)!!
+
     companion object {
+        private const val VIDEO_MODE_PREF = "videoMode"
+        private const val VIDEO_MODE_PREF_TITLE = "Chế độ phát video"
         private const val DEFAULT_BASE_URL_PREF = "defaultBaseUrl"
         private const val BASE_URL_PREF = "overrideBaseUrl"
         private const val BASE_URL_PREF_TITLE = "Ghi đè URL cơ sở"
