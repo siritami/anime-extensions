@@ -50,7 +50,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDecrypted(masterUrl: String, playlistText: String) {
-            Log.d(TAG, "onDecrypted: url=$masterUrl, text=${playlistText.take(200)}")
+            Log.e(TAG, "onDecrypted: url=$masterUrl, text=${playlistText.take(200)}")
             decryptedMasterUrl = masterUrl
             decryptedMaster = playlistText
             latch.countDown()
@@ -58,7 +58,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDirectM3u8(url: String) {
-            Log.d(TAG, "onDirectM3u8: $url")
+            Log.e(TAG, "onDirectM3u8: $url")
             synchronized(directM3u8Urls) {
                 directM3u8Urls.add(url)
             }
@@ -67,7 +67,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDone() {
-            Log.d(TAG, "onDone: decrypted=${decryptedMaster != null}, directUrls=${directM3u8Urls.size}")
+            Log.e(TAG, "onDone: decrypted=${decryptedMaster != null}, directUrls=${directM3u8Urls.size}")
             latch.countDown()
         }
 
@@ -103,7 +103,7 @@ class AnimeVietsubExtractor(
             newView.addJavascriptInterface(jsBridge, JS_BRIDGE_NAME)
             newView.webChromeClient = object : android.webkit.WebChromeClient() {
                 override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
-                    msg?.let { Log.d(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
+                    msg?.let { Log.e(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
                     return true
                 }
             }
@@ -116,7 +116,7 @@ class AnimeVietsubExtractor(
 
                     // Capture m3u8 URLs from network traffic (skip encrypted googleapiscdn ones)
                     if (M3U8_REGEX.containsMatchIn(url) && !url.contains("googleapiscdn.com")) {
-                        Log.d(TAG, "Captured m3u8: $url")
+                        Log.e(TAG, "Captured m3u8: $url")
                         synchronized(capturedM3u8) {
                             if (capturedM3u8.add(url)) latch.countDown()
                         }
@@ -125,7 +125,7 @@ class AnimeVietsubExtractor(
                     // Proxy cross-origin fetch requests to googleapiscdn.com
                     // through OkHttp to bypass CORS and add permissive headers
                     if (url.contains("googleapiscdn.com") && !isNavigationRequest(request)) {
-                        Log.d(TAG, "Proxying googleapiscdn: $url")
+                        Log.e(TAG, "Proxying googleapiscdn: $url")
                         return proxyWithCors(url, request)
                     }
 
@@ -134,7 +134,7 @@ class AnimeVietsubExtractor(
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     if (url == null) return
-                    Log.d(TAG, "onPageFinished: $url")
+                    Log.e(TAG, "onPageFinished: $url")
                     view?.evaluateJavascript(DECRYPT_SCRIPT_TEMPLATE.replace("__BRIDGE__", JS_BRIDGE_NAME), null)
                 }
             }
@@ -143,7 +143,7 @@ class AnimeVietsubExtractor(
         }
 
         val latchResult = latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
-        Log.d(TAG, "Latch result: $latchResult (true=signaled, false=timeout)")
+        Log.e(TAG, "Latch result: $latchResult (true=signaled, false=timeout)")
 
         handler.post {
             webView?.stopLoading()
@@ -158,14 +158,14 @@ class AnimeVietsubExtractor(
 
         val debugMsg = "latch=$latchResult, decrypted=${decryptedMaster != null}, " +
             "directUrls=${directUrls.size}, captured=${captured.size}"
-        Log.d(TAG, debugMsg)
+        Log.e(TAG, debugMsg)
         handler.post { Toast.makeText(context, "AVS: $debugMsg", Toast.LENGTH_LONG).show() }
 
         if (decryptedMaster != null && decryptedMasterUrl != null) {
-            Log.d(TAG, "Decrypted master URL: $decryptedMasterUrl")
-            Log.d(TAG, "Decrypted master text (first 300): ${decryptedMaster.take(300)}")
+            Log.e(TAG, "Decrypted master URL: $decryptedMasterUrl")
+            Log.e(TAG, "Decrypted master text (first 300): ${decryptedMaster.take(300)}")
             val parsedFromDecrypted = parseDecryptedMasterPlaylist(decryptedMasterUrl, decryptedMaster)
-            Log.d(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
+            Log.e(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
             if (parsedFromDecrypted.isNotEmpty()) {
                 return parsedFromDecrypted
             }
@@ -177,7 +177,7 @@ class AnimeVietsubExtractor(
         }.toList()
             .sortedByDescending { url -> MASTER_M3U8_HINT_REGEX.containsMatchIn(url) }
 
-        Log.d(TAG, "Candidate m3u8 URLs: $candidateM3u8Urls")
+        Log.e(TAG, "Candidate m3u8 URLs: $candidateM3u8Urls")
 
         if (candidateM3u8Urls.isEmpty()) {
             Log.e(TAG, "No video URLs found!")
@@ -283,9 +283,9 @@ class AnimeVietsubExtractor(
         }
 
         val response = client.newCall(reqBuilder.build()).execute()
-        Log.d(TAG, "Proxy response: ${response.code} for $url")
+        Log.e(TAG, "Proxy response: ${response.code} for $url")
         val body = response.body.bytes()
-        Log.d(TAG, "Proxy body size: ${body.size} bytes")
+        Log.e(TAG, "Proxy body size: ${body.size} bytes")
 
         // Sync Set-Cookie from response back to CookieManager
         response.headers("Set-Cookie").forEach { cookie ->
