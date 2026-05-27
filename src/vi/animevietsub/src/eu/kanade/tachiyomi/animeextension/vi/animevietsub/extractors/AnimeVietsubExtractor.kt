@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -13,8 +14,14 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Video
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import uy.kohesive.injekt.injectLazy
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -24,7 +31,14 @@ class AnimeVietsubExtractor(
 ) {
     private val context: Application by injectLazy()
     private val handler by lazy { Handler(Looper.getMainLooper()) }
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+
+    // Client with PNG-stripping interceptor for HLS playlist/segment fetching
+    private val hlsClient by lazy {
+        client.newBuilder()
+            .addInterceptor(PngStripInterceptor())
+            .build()
+    }
+    private val playlistUtils by lazy { PlaylistUtils(hlsClient, headers) }
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var decryptedMaster: String? = null
@@ -49,9 +63,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDone() {
-            if (decryptedMaster != null || directM3u8Urls.isNotEmpty()) {
-                latch.countDown()
-            }
+            latch.countDown()
         }
 
         fun directUrls(): List<String> = synchronized(directM3u8Urls) { directM3u8Urls.toList() }
@@ -89,16 +101,21 @@ class AnimeVietsubExtractor(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): WebResourceResponse? {
-                    val url = request?.url.toString()
-                    if (M3U8_REGEX.containsMatchIn(url)) {
-                        var hasNewUrl = false
+                    val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+
+                    // Capture m3u8 URLs from network traffic (skip encrypted googleapiscdn ones)
+                    if (M3U8_REGEX.containsMatchIn(url) && !url.contains("googleapiscdn.com")) {
                         synchronized(capturedM3u8) {
-                            hasNewUrl = capturedM3u8.add(url)
-                        }
-                        if (hasNewUrl) {
-                            latch.countDown()
+                            if (capturedM3u8.add(url)) latch.countDown()
                         }
                     }
+
+                    // Proxy cross-origin fetch requests to googleapiscdn.com
+                    // through OkHttp to bypass CORS and add permissive headers
+                    if (url.contains("googleapiscdn.com") && !isNavigationRequest(request)) {
+                        return proxyWithCors(url, request)
+                    }
+
                     return super.shouldInterceptRequest(view, request)
                 }
 
@@ -178,14 +195,29 @@ class AnimeVietsubExtractor(
                 add(quality to absoluteStreamUrl)
             }
         }
-        if (streamInfos.isEmpty()) return emptyList()
-        return streamInfos.flatMap { (quality, videoUrl) ->
-            playlistUtils.extractFromHls(
-                playlistUrl = videoUrl,
+
+        // Master playlist with variants
+        if (streamInfos.isNotEmpty()) {
+            return streamInfos.flatMap { (quality, videoUrl) ->
+                playlistUtils.extractFromHls(
+                    playlistUrl = videoUrl,
+                    referer = masterUrl,
+                    videoNameGen = { "AnimeVsub:$quality" },
+                )
+            }.distinctBy { it.videoUrl }
+        }
+
+        // Media playlist (no STREAM-INF) — pass the URL directly to playlistUtils
+        // which will return a single Video pointing to the original m3u8 URL
+        if (lines.any { it.startsWith("#EXTINF:", ignoreCase = true) || it.startsWith("#EXT-X-TARGETDURATION:", ignoreCase = true) }) {
+            return playlistUtils.extractFromHls(
+                playlistUrl = masterUrl,
                 referer = masterUrl,
-                videoNameGen = { "AnimeVsub:$quality" },
+                videoNameGen = { "AnimeVsub:$it" },
             )
-        }.distinctBy { it.videoUrl }
+        }
+
+        return emptyList()
     }
 
     private fun normalizeUrl(baseUrl: String, candidate: String): String {
@@ -193,8 +225,122 @@ class AnimeVietsubExtractor(
         return baseUrl.toHttpUrl().resolve(candidate)?.toString() ?: candidate
     }
 
+    /**
+     * Distinguish navigation requests (iframe loads) from JS fetch calls.
+     * Navigation: Accept contains "text/html" and doesn't start with "*/*"
+     * JS fetch:   Accept is "*/*" or absent
+     */
+    private fun isNavigationRequest(request: WebResourceRequest): Boolean {
+        val accept = request.requestHeaders?.get("Accept") ?: return false
+        return accept.contains("text/html") && !accept.startsWith("*/*")
+    }
+
+    /**
+     * Proxy a request through OkHttp and inject CORS-permissive headers
+     * so the WebView allows JS to read the cross-origin response.
+     */
+    private fun proxyWithCors(url: String, request: WebResourceRequest): WebResourceResponse? {
+        return try {
+            val reqBuilder = Request.Builder().url(url)
+
+            // Copy request headers from WebView
+            request.requestHeaders?.forEach { (key, value) ->
+                if (!key.equals("Accept-Encoding", ignoreCase = true)) {
+                    reqBuilder.header(key, value)
+                }
+            }
+
+            // Include cookies from WebView CookieManager (CF clearance, etc.)
+            val cookies = CookieManager.getInstance().getCookie(url)
+            if (!cookies.isNullOrBlank()) {
+                reqBuilder.header("Cookie", cookies)
+            }
+
+            val response = client.newCall(reqBuilder.build()).execute()
+            val body = response.body?.bytes() ?: ByteArray(0)
+
+            // Sync Set-Cookie from response back to CookieManager
+            response.headers("Set-Cookie").forEach { cookie ->
+                CookieManager.getInstance().setCookie(url, cookie)
+            }
+
+            val contentType = response.header("Content-Type") ?: "application/octet-stream"
+            val mimeType = contentType.substringBefore(";").trim()
+            val charset = if (contentType.contains("charset=")) {
+                contentType.substringAfter("charset=").substringBefore(";").trim()
+            } else {
+                "UTF-8"
+            }
+
+            // Build response headers with CORS permissions
+            val responseHeaders = mutableMapOf<String, String>()
+            response.headers.names().forEach { name ->
+                response.header(name)?.let { responseHeaders[name] = it }
+            }
+            responseHeaders["Access-Control-Allow-Origin"] = "*"
+            responseHeaders["Access-Control-Allow-Headers"] = "*"
+            responseHeaders["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+
+            WebResourceResponse(
+                mimeType,
+                charset,
+                response.code,
+                response.message.ifEmpty { "OK" },
+                responseHeaders,
+                ByteArrayInputStream(body),
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * OkHttp interceptor that strips the 127-byte PNG prefix from responses
+     * whose body starts with PNG magic bytes (0x89504E47).
+     * AnimeVietsub disguises HLS segments as PNG files.
+     */
+    private class PngStripInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val response = chain.proceed(chain.request())
+            val body = response.body ?: return response
+            val contentType = response.header("Content-Type") ?: ""
+
+            // Only process responses that could be disguised segments
+            // Skip known text types (playlists, HTML, JSON)
+            if (contentType.startsWith("text/") ||
+                contentType.contains("json") ||
+                contentType.contains("mpegurl")
+            ) {
+                return response
+            }
+
+            val bytes = body.bytes()
+            if (bytes.size > PNG_HEADER_SIZE && isPngMagic(bytes)) {
+                val stripped = bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+                val newBody = stripped.toResponseBody("video/mp2t".toMediaType())
+                return response.newBuilder().body(newBody).build()
+            }
+
+            // Not PNG-wrapped, return original bytes as-is
+            val newBody = bytes.toResponseBody(body.contentType())
+            return response.newBuilder().body(newBody).build()
+        }
+
+        private fun isPngMagic(bytes: ByteArray): Boolean {
+            return bytes[0] == 0x89.toByte() &&
+                bytes[1] == 0x50.toByte() && // P
+                bytes[2] == 0x4E.toByte() && // N
+                bytes[3] == 0x47.toByte() && // G
+                bytes[4] == 0x0D.toByte() &&
+                bytes[5] == 0x0A.toByte() &&
+                bytes[6] == 0x1A.toByte() &&
+                bytes[7] == 0x0A.toByte()
+        }
+    }
+
     companion object {
-        private const val TIMEOUT_SEC: Long = 20
+        private const val PNG_HEADER_SIZE = 127
+        private const val TIMEOUT_SEC: Long = 30
         private const val JS_BRIDGE_NAME = "AnimeVietsubBridge"
         private val M3U8_REGEX = Regex(""".*\.m3u8(\?.*)?$""", RegexOption.IGNORE_CASE)
         private val MASTER_M3U8_HINT_REGEX = Regex("""playlist\.m3u8|master\.m3u8""", RegexOption.IGNORE_CASE)
