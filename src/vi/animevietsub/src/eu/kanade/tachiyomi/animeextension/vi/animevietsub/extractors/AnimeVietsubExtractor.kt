@@ -225,20 +225,16 @@ class AnimeVietsubExtractor(
         return baseUrl.toHttpUrl().resolve(candidate)?.toString() ?: candidate
     }
 
-    /**
-     * Distinguish navigation requests (iframe loads) from JS fetch calls.
-     * Navigation: Accept contains "text/html" and doesn't start with "*/*"
-     * JS fetch:   Accept is "*/*" or absent
-     */
+    // Distinguish navigation requests (iframe loads) from JS fetch calls.
+    // Navigation: Accept contains "text/html" and doesn't start with wildcard
+    // JS fetch: Accept is wildcard or absent
     private fun isNavigationRequest(request: WebResourceRequest): Boolean {
         val accept = request.requestHeaders?.get("Accept") ?: return false
         return accept.contains("text/html") && !accept.startsWith("*/*")
     }
 
-    /**
-     * Proxy a request through OkHttp and inject CORS-permissive headers
-     * so the WebView allows JS to read the cross-origin response.
-     */
+    // Proxy a request through OkHttp and inject CORS-permissive headers
+    // so the WebView allows JS to read the cross-origin response.
     private fun proxyWithCors(url: String, request: WebResourceRequest): WebResourceResponse? {
         return try {
             val reqBuilder = Request.Builder().url(url)
@@ -294,11 +290,9 @@ class AnimeVietsubExtractor(
         }
     }
 
-    /**
-     * OkHttp interceptor that strips the 127-byte PNG prefix from responses
-     * whose body starts with PNG magic bytes (0x89504E47).
-     * AnimeVietsub disguises HLS segments as PNG files.
-     */
+    // OkHttp interceptor that strips the 127-byte PNG prefix from responses
+    // whose body starts with PNG magic bytes (0x89504E47).
+    // AnimeVietsub disguises HLS segments as PNG files.
     private class PngStripInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val response = chain.proceed(chain.request())
