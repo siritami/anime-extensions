@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.CookieManager
+import android.widget.Toast
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -48,6 +50,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDecrypted(masterUrl: String, playlistText: String) {
+            Log.d(TAG, "onDecrypted: url=$masterUrl, text=${playlistText.take(200)}")
             decryptedMasterUrl = masterUrl
             decryptedMaster = playlistText
             latch.countDown()
@@ -55,6 +58,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDirectM3u8(url: String) {
+            Log.d(TAG, "onDirectM3u8: $url")
             synchronized(directM3u8Urls) {
                 directM3u8Urls.add(url)
             }
@@ -63,6 +67,7 @@ class AnimeVietsubExtractor(
 
         @JavascriptInterface
         fun onDone() {
+            Log.d(TAG, "onDone: decrypted=${decryptedMaster != null}, directUrls=${directM3u8Urls.size}")
             latch.countDown()
         }
 
@@ -96,6 +101,12 @@ class AnimeVietsubExtractor(
             }
 
             newView.addJavascriptInterface(jsBridge, JS_BRIDGE_NAME)
+            newView.webChromeClient = object : android.webkit.WebChromeClient() {
+                override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                    msg?.let { Log.d(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
+                    return true
+                }
+            }
             newView.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView?,
@@ -105,6 +116,7 @@ class AnimeVietsubExtractor(
 
                     // Capture m3u8 URLs from network traffic (skip encrypted googleapiscdn ones)
                     if (M3U8_REGEX.containsMatchIn(url) && !url.contains("googleapiscdn.com")) {
+                        Log.d(TAG, "Captured m3u8: $url")
                         synchronized(capturedM3u8) {
                             if (capturedM3u8.add(url)) latch.countDown()
                         }
@@ -113,6 +125,7 @@ class AnimeVietsubExtractor(
                     // Proxy cross-origin fetch requests to googleapiscdn.com
                     // through OkHttp to bypass CORS and add permissive headers
                     if (url.contains("googleapiscdn.com") && !isNavigationRequest(request)) {
+                        Log.d(TAG, "Proxying googleapiscdn: $url")
                         return proxyWithCors(url, request)
                     }
 
@@ -121,6 +134,7 @@ class AnimeVietsubExtractor(
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     if (url == null) return
+                    Log.d(TAG, "onPageFinished: $url")
                     view?.evaluateJavascript(DECRYPT_SCRIPT_TEMPLATE.replace("__BRIDGE__", JS_BRIDGE_NAME), null)
                 }
             }
@@ -128,7 +142,8 @@ class AnimeVietsubExtractor(
             webView?.loadUrl(episodeUrl, requestHeaders)
         }
 
-        latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
+        val latchResult = latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
+        Log.d(TAG, "Latch result: $latchResult (true=signaled, false=timeout)")
 
         handler.post {
             webView?.stopLoading()
@@ -138,21 +153,37 @@ class AnimeVietsubExtractor(
 
         val decryptedMaster = jsBridge.decryptedMaster
         val decryptedMasterUrl = jsBridge.decryptedMasterUrl
+        val directUrls = jsBridge.directUrls()
+        val captured = synchronized(capturedM3u8) { capturedM3u8.toList() }
+
+        val debugMsg = "latch=$latchResult, decrypted=${decryptedMaster != null}, " +
+            "directUrls=${directUrls.size}, captured=${captured.size}"
+        Log.d(TAG, debugMsg)
+        handler.post { Toast.makeText(context, "AVS: $debugMsg", Toast.LENGTH_LONG).show() }
 
         if (decryptedMaster != null && decryptedMasterUrl != null) {
+            Log.d(TAG, "Decrypted master URL: $decryptedMasterUrl")
+            Log.d(TAG, "Decrypted master text (first 300): ${decryptedMaster.take(300)}")
             val parsedFromDecrypted = parseDecryptedMasterPlaylist(decryptedMasterUrl, decryptedMaster)
+            Log.d(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
             if (parsedFromDecrypted.isNotEmpty()) {
                 return parsedFromDecrypted
             }
         }
 
         val candidateM3u8Urls = linkedSetOf<String>().apply {
-            addAll(jsBridge.directUrls())
-            addAll(capturedM3u8)
+            addAll(directUrls)
+            addAll(captured)
         }.toList()
             .sortedByDescending { url -> MASTER_M3U8_HINT_REGEX.containsMatchIn(url) }
 
-        if (candidateM3u8Urls.isEmpty()) return emptyList()
+        Log.d(TAG, "Candidate m3u8 URLs: $candidateM3u8Urls")
+
+        if (candidateM3u8Urls.isEmpty()) {
+            Log.e(TAG, "No video URLs found!")
+            handler.post { Toast.makeText(context, "AVS: No video URLs found", Toast.LENGTH_LONG).show() }
+            return emptyList()
+        }
 
         val videos = buildList {
             candidateM3u8Urls.forEach { playlistUrl ->
@@ -252,7 +283,9 @@ class AnimeVietsubExtractor(
         }
 
         val response = client.newCall(reqBuilder.build()).execute()
-        val body = response.body?.bytes() ?: ByteArray(0)
+        Log.d(TAG, "Proxy response: ${response.code} for $url")
+        val body = response.body.bytes()
+        Log.d(TAG, "Proxy body size: ${body.size} bytes")
 
         // Sync Set-Cookie from response back to CookieManager
         response.headers("Set-Cookie").forEach { cookie ->
@@ -285,6 +318,7 @@ class AnimeVietsubExtractor(
             ByteArrayInputStream(body),
         )
     } catch (e: Exception) {
+        Log.e(TAG, "proxyWithCors error for $url", e)
         null
     }
 
@@ -294,7 +328,7 @@ class AnimeVietsubExtractor(
     private class PngStripInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val response = chain.proceed(chain.request())
-            val body = response.body ?: return response
+            val body = response.body
             val contentType = response.header("Content-Type") ?: ""
 
             // Only process responses that could be disguised segments
@@ -329,6 +363,7 @@ class AnimeVietsubExtractor(
     }
 
     companion object {
+        private const val TAG = "AnimeVietsubExt"
         private const val PNG_HEADER_SIZE = 127
         private const val TIMEOUT_SEC: Long = 30
         private const val JS_BRIDGE_NAME = "AnimeVietsubBridge"
@@ -339,9 +374,10 @@ class AnimeVietsubExtractor(
         private const val DECRYPT_SCRIPT_TEMPLATE = """
             (function () {
               var bridge = window.__BRIDGE__;
-              if (!bridge || !window.fetch) return;
-              if (window.__avsDecryptStarted) return;
+              if (!bridge || !window.fetch) { console.log('AVS: no bridge or fetch'); return; }
+              if (window.__avsDecryptStarted) { console.log('AVS: already started'); return; }
               window.__avsDecryptStarted = true;
+              console.log('AVS: script started, PLAYER_DATA=' + JSON.stringify(window.PLAYER_DATA));
               var done = false;
 
               function notifyDone() {
@@ -364,6 +400,7 @@ class AnimeVietsubExtractor(
               }
 
               function tryGoogleApisCdn(playerUrl) {
+                console.log('AVS: tryGoogleApisCdn: ' + playerUrl);
                 return new Promise(function (resolve) {
                   var iframe = document.createElement('iframe');
                   iframe.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
@@ -379,18 +416,23 @@ class AnimeVietsubExtractor(
               }
 
               function fetchPlayerPageAndRunLoader(playerUrl, iframe) {
+                console.log('AVS: fetchPlayerPage: ' + playerUrl);
                 return fetch(playerUrl, { headers: { Referer: playerUrl } })
                   .then(function (res) {
+                    console.log('AVS: playerPage response: ' + res.status);
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     return res.text();
                   })
                   .then(function (html) {
+                    console.log('AVS: playerPage html length: ' + html.length);
                     try { iframe.remove(); } catch (e) {}
                     var tokenMatch = html.match(/const\\s+avsToken\\s*=\\s*\"([^\"]+)\"/);
                     var hashMatch = playerUrl.match(/\\/player\\/([0-9a-f]+)/);
+                    console.log('AVS: tokenMatch=' + !!tokenMatch + ' hashMatch=' + !!hashMatch);
                     if (!tokenMatch || !hashMatch) return false;
 
                     var avsToken = tokenMatch[1];
+                    console.log('AVS: token=' + avsToken.substring(0,20) + '... hash=' + hashMatch[1]);
                     var videoHash = hashMatch[1];
                     var baseUrl = playerUrl.match(/^(https?:\\/\\/[^/]+)/)[1];
                     var loaderUrlMatch = html.match(/<script[^>]+src=\"([^\"]*avs-loader\\.min\\.js[^\"]*)\"/);
@@ -399,28 +441,34 @@ class AnimeVietsubExtractor(
                       : 'https://storage.googleapiscdn.com/static/avs-loader.min.js?v=1.3.7';
                     if (loaderUrl.startsWith('/')) loaderUrl = baseUrl + loaderUrl;
 
+                    console.log('AVS: loading avs-loader from: ' + loaderUrl);
                     return fetch(loaderUrl, { headers: { Referer: playerUrl } })
-                      .then(function (r) { return r.text(); })
+                      .then(function (r) { console.log('AVS: loader response: ' + r.status); return r.text(); })
                       .then(function (scriptText) {
+                        console.log('AVS: loader script length: ' + scriptText.length);
                         var s = document.createElement('script');
                         s.textContent = scriptText;
                         document.body.appendChild(s);
 
+                        console.log('AVS: AvsDecryptPlaylist available: ' + (typeof window.AvsDecryptPlaylist));
                         if (typeof window.AvsDecryptPlaylist !== 'function') {
                           return false;
                         }
 
                         var m3u8Url = baseUrl + '/playlist/' + videoHash + '/playlist.m3u8?token=' + encodeURIComponent(avsToken);
+                        console.log('AVS: decrypting m3u8: ' + m3u8Url);
                         return window.AvsDecryptPlaylist(m3u8Url).then(function (decryptedM3u8) {
+                          console.log('AVS: decrypt result length=' + (decryptedM3u8 ? decryptedM3u8.length : 0) + ' hasM3U8=' + (decryptedM3u8 && decryptedM3u8.indexOf('#EXTM3U') !== -1));
                           if (decryptedM3u8 && decryptedM3u8.indexOf('#EXTM3U') !== -1) {
                             notifyDecrypted(m3u8Url, decryptedM3u8);
                             return true;
                           } else {
+                            console.log('AVS: decrypt FAILED, first 200: ' + (decryptedM3u8 ? decryptedM3u8.substring(0,200) : 'null'));
                             return false;
                           }
-                        });
+                        }).catch(function(err) { console.log('AVS: AvsDecryptPlaylist error: ' + err); return false; });
                       })
-                      .catch(function () { return false; });
+                      .catch(function (err) { console.log('AVS: loader fetch error: ' + err); return false; });
                   })
                   .catch(function () { return false; });
               }
@@ -462,6 +510,7 @@ class AnimeVietsubExtractor(
               }
 
               function callAjaxPlayer(hash, id, referer, site) {
+                console.log('AVS: callAjaxPlayer hash=' + hash + ' id=' + id);
                 var postBody = 'link=' + encodeURIComponent(hash);
                 if (id) postBody += '&id=' + encodeURIComponent(id);
 
@@ -474,8 +523,9 @@ class AnimeVietsubExtractor(
                   },
                   body: postBody,
                 })
-                  .then(function (res) { return res.text(); })
+                  .then(function (res) { console.log('AVS: ajax/player response: ' + res.status); return res.text(); })
                   .then(function (text) {
+                    console.log('AVS: ajax/player body: ' + text.substring(0,200));
                     try {
                       return JSON.parse(text);
                     } catch (e) {
@@ -483,10 +533,11 @@ class AnimeVietsubExtractor(
                     }
                   })
                   .then(handlePlayerResponse)
-                  .catch(function () { return false; });
+                  .catch(function (err) { console.log('AVS: ajax/player error: ' + err); return false; });
               }
 
               function parseFromPlayerData(pd) {
+                console.log('AVS: parseFromPlayerData playTech=' + (pd && pd.playTech) + ' linkType=' + (pd && typeof pd.link));
                 if (!pd) return Promise.resolve(false);
 
                 if (pd.playTech === 'iframe' && typeof pd.link === 'string') {
