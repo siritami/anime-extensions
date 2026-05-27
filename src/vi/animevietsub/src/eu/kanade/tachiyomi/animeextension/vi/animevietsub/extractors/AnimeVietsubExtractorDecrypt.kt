@@ -71,7 +71,9 @@ class AnimeVietsubExtractorDecrypt(
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var playerUrl: String? = null
+
         @Volatile var decryptedMasterUrl: String? = null
+
         @Volatile var decryptedMaster: String? = null
         private val directM3u8Urls = linkedSetOf<String>()
 
@@ -225,11 +227,17 @@ class AnimeVietsubExtractorDecrypt(
         }
 
         val tokenMatch = Regex("""const\s+avsToken\s*=\s*"([^"]+)"""").find(html)
-            ?: run { Log.e(TAG, "No avsToken in player page"); return null }
+            ?: run {
+                Log.e(TAG, "No avsToken in player page")
+                return null
+            }
         val avsToken = tokenMatch.groupValues[1]
 
         val hashMatch = Regex("""/player/([0-9a-f]+)""").find(playerUrl)
-            ?: run { Log.e(TAG, "No hash in player URL"); return null }
+            ?: run {
+                Log.e(TAG, "No hash in player URL")
+                return null
+            }
         val videoHash = hashMatch.groupValues[1]
 
         val baseUrl = playerUrl.toHttpUrl().let { "${it.scheme}://${it.host}" }
@@ -304,7 +312,10 @@ class AnimeVietsubExtractorDecrypt(
         val bytes = base64UrlDecode(envB64)
         if (bytes.size < 11) return null
         if (bytes[0] != 85.toByte() || bytes[1] != 83.toByte() ||
-            bytes[2] != 68.toByte() || bytes[3] != 75.toByte()) return null
+            bytes[2] != 68.toByte() || bytes[3] != 75.toByte()
+        ) {
+            return null
+        }
         if (bytes[4] != 1.toByte()) return null
         val payloadLen = (bytes[5].toInt() and 0xFF shl 8) or (bytes[6].toInt() and 0xFF)
         if (bytes.size < 7 + payloadLen + 4) return null
@@ -408,9 +419,7 @@ class AnimeVietsubExtractorDecrypt(
         }
     }
 
-    private fun lcgNext(state: Int): Int {
-        return (state.toLong() * 1664525L + 1013904223L).toInt()
-    }
+    private fun lcgNext(state: Int): Int = (state.toLong() * 1664525L + 1013904223L).toInt()
 
     // Layer 2: AES-CTR decrypt segment URLs
     private fun decryptLayer2(intermediateM3u8: String, jtiOdd: String, baseUrl: String): String {
@@ -524,7 +533,9 @@ class AnimeVietsubExtractorDecrypt(
         }
 
         fun stop() {
-            try { serverSocket?.close() } catch (_: Exception) {}
+            try {
+                serverSocket?.close()
+            } catch (_: Exception) {}
             serverSocket = null
         }
 
@@ -553,7 +564,9 @@ class AnimeVietsubExtractorDecrypt(
             } catch (e: Exception) {
                 Log.e(TAG, "Proxy connection error", e)
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                try {
+                    socket.close()
+                } catch (_: Exception) {}
             }
         }
 

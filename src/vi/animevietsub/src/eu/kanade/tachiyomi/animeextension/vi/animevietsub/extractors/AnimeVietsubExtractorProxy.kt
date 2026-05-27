@@ -179,7 +179,6 @@ class AnimeVietsubExtractorProxy(
         val directUrls = jsBridge.directUrls()
         val captured = synchronized(capturedM3u8) { capturedM3u8.toList() }
 
-
         if (decryptedMaster != null && decryptedMasterUrl != null) {
             try {
                 val proxy = ensureProxyRunning()
