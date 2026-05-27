@@ -301,9 +301,13 @@ class AnimeVietsubExtractor(
         }
 
         // Build response headers with CORS permissions
+        // Skip existing CORS headers to avoid duplicates (case-sensitive map keys)
+        val corsHeaders = setOf("access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "access-control-allow-credentials")
         val responseHeaders = mutableMapOf<String, String>()
         response.headers.names().forEach { name ->
-            response.header(name)?.let { responseHeaders[name] = it }
+            if (name.lowercase() !in corsHeaders) {
+                response.header(name)?.let { responseHeaders[name] = it }
+            }
         }
         responseHeaders["Access-Control-Allow-Origin"] = "*"
         responseHeaders["Access-Control-Allow-Headers"] = "*"
