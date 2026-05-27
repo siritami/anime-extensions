@@ -24,6 +24,12 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import uy.kohesive.injekt.injectLazy
 import java.io.ByteArrayInputStream
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -41,6 +47,26 @@ class AnimeVietsubExtractor(
             .build()
     }
     private val playlistUtils by lazy { PlaylistUtils(hlsClient, headers) }
+
+    @Volatile private var segmentProxy: SegmentProxyServer? = null
+
+    private fun ensureProxyRunning(): SegmentProxyServer {
+        segmentProxy?.let { if (!it.isClosed) return it }
+        val proxy = SegmentProxyServer(client)
+        proxy.start()
+        segmentProxy = proxy
+        return proxy
+    }
+
+    private fun rewritePlaylistForProxy(m3u8: String, port: Int): String =
+        m3u8.lines().joinToString("\n") { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
+                "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
+            } else {
+                line
+            }
+        }
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var decryptedMaster: String? = null
@@ -122,11 +148,18 @@ class AnimeVietsubExtractor(
                         }
                     }
 
-                    // Proxy cross-origin fetch requests to googleapiscdn.com
-                    // through OkHttp to bypass CORS and add permissive headers
-                    if (url.contains("googleapiscdn.com") && !isNavigationRequest(request)) {
-                        Log.e(TAG, "Proxying googleapiscdn: $url")
-                        return proxyWithCors(url, request)
+                    // Proxy requests to googleapiscdn.com
+                    if (url.contains("googleapiscdn.com")) {
+                        // Player page navigation: proxy HTML and inject capture script
+                        if (isNavigationRequest(request) && url.contains("/player/")) {
+                            Log.e(TAG, "Proxying player page: $url")
+                            return proxyPlayerPage(url, request)
+                        }
+                        // Non-navigation: proxy with CORS headers for JS fetch
+                        if (!isNavigationRequest(request)) {
+                            Log.e(TAG, "Proxying googleapiscdn: $url")
+                            return proxyWithCors(url, request)
+                        }
                     }
 
                     return super.shouldInterceptRequest(view, request)
@@ -164,10 +197,21 @@ class AnimeVietsubExtractor(
         if (decryptedMaster != null && decryptedMasterUrl != null) {
             Log.e(TAG, "Decrypted master URL: $decryptedMasterUrl")
             Log.e(TAG, "Decrypted master text (first 300): ${decryptedMaster.take(300)}")
-            val parsedFromDecrypted = parseDecryptedMasterPlaylist(decryptedMasterUrl, decryptedMaster)
-            Log.e(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
-            if (parsedFromDecrypted.isNotEmpty()) {
-                return parsedFromDecrypted
+            try {
+                val proxy = ensureProxyRunning()
+                val rewritten = rewritePlaylistForProxy(decryptedMaster, proxy.port)
+                proxy.cachedPlaylist = rewritten
+                val proxyUrl = "http://127.0.0.1:${proxy.port}/playlist.m3u8"
+                Log.e(TAG, "Serving decrypted m3u8 via local proxy: $proxyUrl")
+                handler.post { Toast.makeText(context, "AVS: proxy on port ${proxy.port}", Toast.LENGTH_SHORT).show() }
+                return listOf(Video(proxyUrl, "AnimeVsub", proxyUrl))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start proxy, falling back to extractFromHls", e)
+                val parsedFromDecrypted = parseDecryptedMasterPlaylist(decryptedMasterUrl, decryptedMaster)
+                Log.e(TAG, "Parsed from decrypted: ${parsedFromDecrypted.size} videos")
+                if (parsedFromDecrypted.isNotEmpty()) {
+                    return parsedFromDecrypted
+                }
             }
         }
 
@@ -302,7 +346,7 @@ class AnimeVietsubExtractor(
 
         // Build response headers with CORS permissions
         // Skip existing CORS headers to avoid duplicates (case-sensitive map keys)
-        val corsHeaders = setOf("access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "access-control-allow-credentials")
+        val corsHeaders = setOf("access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "access-control-allow-credentials", "access-control-expose-headers")
         val responseHeaders = mutableMapOf<String, String>()
         response.headers.names().forEach { name ->
             if (name.lowercase() !in corsHeaders) {
@@ -312,6 +356,7 @@ class AnimeVietsubExtractor(
         responseHeaders["Access-Control-Allow-Origin"] = "*"
         responseHeaders["Access-Control-Allow-Headers"] = "*"
         responseHeaders["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        responseHeaders["Access-Control-Expose-Headers"] = "*"
 
         WebResourceResponse(
             mimeType,
@@ -323,6 +368,49 @@ class AnimeVietsubExtractor(
         )
     } catch (e: Exception) {
         Log.e(TAG, "proxyWithCors error for $url", e)
+        null
+    }
+
+    // Proxy the player page HTML and inject a capture script that uses
+    // the site's own _avsDecryptM3u8 to decrypt the playlist, then
+    // posts the result back to the parent page via postMessage.
+    private fun proxyPlayerPage(url: String, request: WebResourceRequest): WebResourceResponse? = try {
+        val reqBuilder = Request.Builder().url(url)
+        request.requestHeaders?.forEach { (key, value) ->
+            if (!key.equals("Accept-Encoding", ignoreCase = true)) {
+                reqBuilder.header(key, value)
+            }
+        }
+        val cookies = CookieManager.getInstance().getCookie(url)
+        if (!cookies.isNullOrBlank()) reqBuilder.header("Cookie", cookies)
+
+        val response = client.newCall(reqBuilder.build()).execute()
+        Log.e(TAG, "Player page response: ${response.code} for $url")
+
+        var html = response.body.string()
+        Log.e(TAG, "Player page HTML size: ${html.length}")
+
+        response.headers("Set-Cookie").forEach { cookie ->
+            CookieManager.getInstance().setCookie(url, cookie)
+        }
+
+        // Inject capture script before </body>
+        html = html.replace("</body>", "$PLAYER_CAPTURE_SCRIPT</body>")
+
+        val bodyBytes = html.toByteArray(Charsets.UTF_8)
+        WebResourceResponse(
+            "text/html",
+            "UTF-8",
+            response.code,
+            response.message.ifEmpty { "OK" },
+            mapOf(
+                "Content-Type" to "text/html; charset=utf-8",
+                "Cache-Control" to "no-cache",
+            ),
+            ByteArrayInputStream(bodyBytes),
+        )
+    } catch (e: Exception) {
+        Log.e(TAG, "proxyPlayerPage error for $url", e)
         null
     }
 
@@ -366,6 +454,95 @@ class AnimeVietsubExtractor(
             bytes[7] == 0x0A.toByte()
     }
 
+    // Local HTTP server that serves the decrypted m3u8 playlist and
+    // proxies segment requests with PNG-header stripping so mpv can play.
+    private class SegmentProxyServer(private val httpClient: OkHttpClient) {
+        private var serverSocket: ServerSocket? = null
+        @Volatile var cachedPlaylist: String? = null
+        val port: Int get() = serverSocket?.localPort ?: 0
+        val isClosed: Boolean get() = serverSocket?.isClosed != false
+
+        fun start(): Int {
+            if (serverSocket != null && !serverSocket!!.isClosed) return port
+            val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+            serverSocket = ss
+            Thread({
+                while (!ss.isClosed) {
+                    try {
+                        val conn = ss.accept()
+                        Thread { handleConnection(conn) }.start()
+                    } catch (_: Exception) {}
+                }
+            }, "AVS-ProxyAccept").start()
+            return ss.localPort
+        }
+
+        fun stop() {
+            try { serverSocket?.close() } catch (_: Exception) {}
+            serverSocket = null
+        }
+
+        private fun handleConnection(socket: Socket) {
+            try {
+                socket.soTimeout = 60_000
+                val input = socket.getInputStream().bufferedReader()
+                val requestLine = input.readLine() ?: return
+                while (input.readLine()?.isEmpty() == false) { /* consume headers */ }
+
+                val path = requestLine.split(" ").getOrNull(1) ?: return
+                val output = socket.getOutputStream()
+
+                when {
+                    path == "/playlist.m3u8" -> servePlaylist(output)
+                    path.startsWith("/seg?u=") -> serveSegment(path, output)
+                    else -> serve404(output)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Proxy connection error", e)
+            } finally {
+                try { socket.close() } catch (_: Exception) {}
+            }
+        }
+
+        private fun servePlaylist(output: OutputStream) {
+            val body = (cachedPlaylist ?: "#EXTM3U\n").toByteArray()
+            writeHttp(output, 200, "application/vnd.apple.mpegurl", body)
+        }
+
+        private fun serveSegment(path: String, output: OutputStream) {
+            val url = URLDecoder.decode(path.substringAfter("u="), "UTF-8")
+            val request = Request.Builder().url(url).build()
+            val response = httpClient.newCall(request).execute()
+            val bytes = response.body.bytes()
+            val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
+                bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+            } else {
+                bytes
+            }
+            writeHttp(output, 200, "video/mp2t", result)
+        }
+
+        private fun serve404(output: OutputStream) {
+            writeHttp(output, 404, "text/plain", "Not Found".toByteArray())
+        }
+
+        private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
+            val status = if (code == 200) "OK" else "Not Found"
+            val header = "HTTP/1.1 $code $status\r\n" +
+                "Content-Type: $contentType\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
+                "Connection: close\r\n\r\n"
+            output.write(header.toByteArray())
+            output.write(body)
+            output.flush()
+        }
+
+        private fun isPng(bytes: ByteArray): Boolean =
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+    }
+
     companion object {
         private const val TAG = "AnimeVietsubExt"
         private const val PNG_HEADER_SIZE = 127
@@ -406,75 +583,28 @@ class AnimeVietsubExtractor(
               function tryGoogleApisCdn(playerUrl) {
                 console.log('AVS: tryGoogleApisCdn: ' + playerUrl);
                 return new Promise(function (resolve) {
+                  function onMessage(e) {
+                    if (e.data && e.data.type === 'avs-decrypted-m3u8') {
+                      window.removeEventListener('message', onMessage);
+                      console.log('AVS: got decrypted m3u8, len=' + (e.data.text ? e.data.text.length : 0));
+                      if (e.data.text && e.data.text.indexOf('#EXTM3U') !== -1) {
+                        notifyDecrypted(e.data.url, e.data.text);
+                        resolve(true);
+                      } else {
+                        resolve(false);
+                      }
+                    } else if (e.data && e.data.type === 'avs-decrypt-timeout') {
+                      window.removeEventListener('message', onMessage);
+                      console.log('AVS: iframe decrypt timeout');
+                      resolve(false);
+                    }
+                  }
+                  window.addEventListener('message', onMessage);
                   var iframe = document.createElement('iframe');
                   iframe.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
                   iframe.src = playerUrl;
                   (document.body || document.documentElement).appendChild(iframe);
-
-                  setTimeout(function () {
-                    fetchPlayerPageAndRunLoader(playerUrl, iframe)
-                      .then(resolve)
-                      .catch(function () { resolve(false); });
-                  }, 1000);
                 });
-              }
-
-              function fetchPlayerPageAndRunLoader(playerUrl, iframe) {
-                console.log('AVS: fetchPlayerPage: ' + playerUrl);
-                return fetch(playerUrl, { headers: { Referer: playerUrl } })
-                  .then(function (res) {
-                    console.log('AVS: playerPage response: ' + res.status);
-                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                    return res.text();
-                  })
-                  .then(function (html) {
-                    console.log('AVS: playerPage html length: ' + html.length);
-                    try { iframe.remove(); } catch (e) {}
-                    var tokenMatch = html.match(/const\s+avsToken\s*=\s*"([^"]+)"/);
-                    var hashMatch = playerUrl.match(/\/player\/([0-9a-f]+)/);
-                    console.log('AVS: tokenMatch=' + !!tokenMatch + ' hashMatch=' + !!hashMatch);
-                    if (!tokenMatch || !hashMatch) return false;
-
-                    var avsToken = tokenMatch[1];
-                    console.log('AVS: token=' + avsToken.substring(0,20) + '... hash=' + hashMatch[1]);
-                    var videoHash = hashMatch[1];
-                    var baseUrl = playerUrl.match(/^(https?:\/\/[^/]+)/)[1];
-                    var loaderUrlMatch = html.match(/<script[^>]+src="([^"]*avs-loader\.min\.js[^"]*)"/);
-                    var loaderUrl = loaderUrlMatch
-                      ? loaderUrlMatch[1]
-                      : 'https://storage.googleapiscdn.com/static/avs-loader.min.js?v=1.3.7';
-                    if (loaderUrl.startsWith('/')) loaderUrl = baseUrl + loaderUrl;
-
-                    console.log('AVS: loading avs-loader from: ' + loaderUrl);
-                    return fetch(loaderUrl, { headers: { Referer: playerUrl } })
-                      .then(function (r) { console.log('AVS: loader response: ' + r.status); return r.text(); })
-                      .then(function (scriptText) {
-                        console.log('AVS: loader script length: ' + scriptText.length);
-                        var s = document.createElement('script');
-                        s.textContent = scriptText;
-                        document.body.appendChild(s);
-
-                        console.log('AVS: AvsDecryptPlaylist available: ' + (typeof window.AvsDecryptPlaylist));
-                        if (typeof window.AvsDecryptPlaylist !== 'function') {
-                          return false;
-                        }
-
-                        var m3u8Url = baseUrl + '/playlist/' + videoHash + '/playlist.m3u8?token=' + encodeURIComponent(avsToken);
-                        console.log('AVS: decrypting m3u8: ' + m3u8Url);
-                        return window.AvsDecryptPlaylist(m3u8Url).then(function (decryptedM3u8) {
-                          console.log('AVS: decrypt result length=' + (decryptedM3u8 ? decryptedM3u8.length : 0) + ' hasM3U8=' + (decryptedM3u8 && decryptedM3u8.indexOf('#EXTM3U') !== -1));
-                          if (decryptedM3u8 && decryptedM3u8.indexOf('#EXTM3U') !== -1) {
-                            notifyDecrypted(m3u8Url, decryptedM3u8);
-                            return true;
-                          } else {
-                            console.log('AVS: decrypt FAILED, first 200: ' + (decryptedM3u8 ? decryptedM3u8.substring(0,200) : 'null'));
-                            return false;
-                          }
-                        }).catch(function(err) { console.log('AVS: AvsDecryptPlaylist error: ' + err); return false; });
-                      })
-                      .catch(function (err) { console.log('AVS: loader fetch error: ' + err); return false; });
-                  })
-                  .catch(function () { return false; });
               }
 
               function handleDirectLink(link) {
@@ -609,5 +739,51 @@ class AnimeVietsubExtractor(
               start();
             })();
         """
+
+        // Script injected into the player page HTML by proxyPlayerPage.
+        // Waits for the site's own _avsDecryptM3u8 (defined by avs-loader.min.js),
+        // fetches the m3u8 playlist, decrypts it, and posts the result to the parent.
+        private const val PLAYER_CAPTURE_SCRIPT = """
+<script>
+(function(){
+  var maxWait=200,count=0;
+  var check=setInterval(function(){
+    if(typeof window._avsDecryptM3u8==='function'){
+      clearInterval(check);
+      doCapture();
+    }else if(++count>=maxWait){
+      clearInterval(check);
+      console.log('AVS-inject: timeout waiting for _avsDecryptM3u8');
+      try{window.parent.postMessage({type:'avs-decrypt-timeout'},'*');}catch(x){}
+    }
+  },50);
+  function doCapture(){
+    console.log('AVS-inject: _avsDecryptM3u8 ready');
+    var html=document.documentElement.innerHTML;
+    var tokenMatch=html.match(/const\s+avsToken\s*=\s*"([^"]+)"/);
+    if(!tokenMatch){console.log('AVS-inject: no token found');return;}
+    var hashMatch=location.pathname.match(/\/player\/([0-9a-f]+)/);
+    if(!hashMatch){console.log('AVS-inject: no hash found');return;}
+    var m3u8Path='/playlist/'+hashMatch[1]+'/playlist.m3u8?token='+encodeURIComponent(tokenMatch[1]);
+    console.log('AVS-inject: fetching playlist');
+    fetch(m3u8Path).then(function(r){
+      var headers={};
+      r.headers.forEach(function(v,k){headers[k.toLowerCase()]=v;});
+      return r.text().then(function(t){return{text:t,headers:headers};});
+    }).then(function(res){
+      console.log('AVS-inject: m3u8 fetched, size='+res.text.length+', has-envelope='+!!res.headers['x-envelope']);
+      return window._avsDecryptM3u8(res.text,res.headers);
+    }).then(function(decrypted){
+      console.log('AVS-inject: decrypted, len='+(decrypted?decrypted.length:0));
+      var masterUrl=location.origin+m3u8Path;
+      window.parent.postMessage({type:'avs-decrypted-m3u8',url:masterUrl,text:decrypted},'*');
+    }).catch(function(e){
+      console.log('AVS-inject: error: '+e);
+      try{window.parent.postMessage({type:'avs-decrypt-timeout'},'*');}catch(x){}
+    });
+  }
+})();
+</script>
+"""
     }
 }
