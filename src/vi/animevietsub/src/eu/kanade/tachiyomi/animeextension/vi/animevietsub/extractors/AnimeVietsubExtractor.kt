@@ -30,7 +30,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -70,46 +70,65 @@ class AnimeVietsubExtractor(
         }
     }
 
-    private class JsBridge(private val latch: CountDownLatch) {
+    private class JsBridge(private val signal: Semaphore) {
         @Volatile var decryptedMaster: String? = null
 
         @Volatile var decryptedMasterUrl: String? = null
+
+        @Volatile private var done = false
         private val directM3u8Urls = linkedSetOf<String>()
 
         @JavascriptInterface
         fun onDecrypted(masterUrl: String, playlistText: String) {
             decryptedMasterUrl = masterUrl
             decryptedMaster = playlistText
-            latch.countDown()
+            signal.release()
         }
 
         @JavascriptInterface
         fun onDirectM3u8(url: String) {
-            synchronized(directM3u8Urls) {
-                directM3u8Urls.add(url)
-            }
-            latch.countDown()
+            synchronized(directM3u8Urls) { directM3u8Urls.add(url) }
+            signal.release()
         }
 
         @JavascriptInterface
         fun onDone() {
-            latch.countDown()
+            done = true
+            signal.release()
         }
 
+        @JavascriptInterface
+        fun resetTimer() {
+            signal.release()
+        }
+
+        fun isFinished(): Boolean = done || decryptedMaster != null || synchronized(directM3u8Urls) { directM3u8Urls.isNotEmpty() }
+
         fun directUrls(): List<String> = synchronized(directM3u8Urls) { directM3u8Urls.toList() }
+
+        fun await(timeout: Long, unit: TimeUnit): Boolean {
+            val deadlineMs = System.currentTimeMillis() + unit.toMillis(timeout)
+            while (!isFinished()) {
+                val remaining = deadlineMs - System.currentTimeMillis()
+                if (remaining <= 0) return false
+                if (!signal.tryAcquire(remaining, TimeUnit.MILLISECONDS)) return false
+            }
+            return true
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     fun videosFromEpisodeUrl(episodeUrl: String): List<Video> {
-        val latch = CountDownLatch(1)
+        val signal = Semaphore(0)
         val capturedM3u8 = linkedSetOf<String>()
         var webView: WebView? = null
-        val jsBridge = JsBridge(latch)
+        val bridgeName = generateBridgeName()
+        val jsBridge = JsBridge(signal)
 
-        val requestHeaders = headers.names()
-            .mapNotNull { name -> headers[name]?.let { name to it } }
-            .toMap()
-            .toMutableMap()
+        // Fetch episode page with OkHttp for proper headers/cookies
+        val episodeHtml = fetchPage(episodeUrl)
+        val script = DECRYPT_SCRIPT_TEMPLATE.replace("__BRIDGE__", bridgeName)
+        val injectedHtml = episodeHtml.replace("</body>", "<script>$script</script></body>")
 
         handler.post {
             val newView = WebView(context)
@@ -119,13 +138,12 @@ class AnimeVietsubExtractor(
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
+                blockNetworkImage = true
                 mediaPlaybackRequiresUserGesture = false
-                useWideViewPort = false
-                loadWithOverviewMode = false
                 userAgentString = headers["User-Agent"]
             }
 
-            newView.addJavascriptInterface(jsBridge, JS_BRIDGE_NAME)
+            newView.addJavascriptInterface(jsBridge, bridgeName)
             newView.webChromeClient = object : android.webkit.WebChromeClient() {
                 override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
                     msg?.let { Log.d(TAG, "JS[${it.sourceId()}:${it.lineNumber()}] ${it.message()}") }
@@ -141,7 +159,7 @@ class AnimeVietsubExtractor(
 
                     if (M3U8_REGEX.containsMatchIn(url) && !url.contains("googleapiscdn.com")) {
                         synchronized(capturedM3u8) {
-                            if (capturedM3u8.add(url)) latch.countDown()
+                            if (capturedM3u8.add(url)) signal.release()
                         }
                     }
 
@@ -156,17 +174,12 @@ class AnimeVietsubExtractor(
 
                     return super.shouldInterceptRequest(view, request)
                 }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    if (url == null) return
-                    view?.evaluateJavascript(DECRYPT_SCRIPT_TEMPLATE.replace("__BRIDGE__", JS_BRIDGE_NAME), null)
-                }
             }
 
-            webView?.loadUrl(episodeUrl, requestHeaders)
+            newView.loadDataWithBaseURL(episodeUrl, injectedHtml, "text/html", "utf-8", null)
         }
 
-        val latchResult = latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
+        jsBridge.await(TIMEOUT_SEC, TimeUnit.SECONDS)
 
         handler.post {
             webView?.stopLoading()
@@ -275,6 +288,28 @@ class AnimeVietsubExtractor(
     private fun normalizeUrl(baseUrl: String, candidate: String): String {
         if (candidate.startsWith("http://") || candidate.startsWith("https://")) return candidate
         return baseUrl.toHttpUrl().resolve(candidate)?.toString() ?: candidate
+    }
+
+    private fun fetchPage(url: String): String {
+        val reqBuilder = Request.Builder().url(url)
+        headers.names().forEach { name ->
+            if (!name.equals("Host", ignoreCase = true)) {
+                headers[name]?.let { reqBuilder.header(name, it) }
+            }
+        }
+        val cookies = CookieManager.getInstance().getCookie(url)
+        if (!cookies.isNullOrBlank()) reqBuilder.header("Cookie", cookies)
+
+        val response = client.newCall(reqBuilder.build()).execute()
+        response.headers("Set-Cookie").forEach { cookie ->
+            CookieManager.getInstance().setCookie(url, cookie)
+        }
+        return response.body.string()
+    }
+
+    private fun generateBridgeName(): String {
+        val pool = ('a'..'z') + ('A'..'Z')
+        return (1..(10..20).random()).map { pool.random() }.joinToString("")
     }
 
     private fun isNavigationRequest(request: WebResourceRequest): Boolean {
@@ -568,7 +603,6 @@ class AnimeVietsubExtractor(
         private const val TAG = "AnimeVietsubExt"
         private const val PNG_HEADER_SIZE = 127
         private const val TIMEOUT_SEC: Long = 30
-        private const val JS_BRIDGE_NAME = "AnimeVietsubBridge"
         private val M3U8_REGEX = Regex(""".*\.m3u8(\?.*)?$""", RegexOption.IGNORE_CASE)
         private val MASTER_M3U8_HINT_REGEX = Regex("""playlist\.m3u8|master\.m3u8""", RegexOption.IGNORE_CASE)
         private val RESOLUTION_REGEX = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
@@ -757,7 +791,11 @@ class AnimeVietsubExtractor(
                   );
               }
 
-              start();
+              if (document.readyState === 'complete') {
+                start();
+              } else {
+                window.addEventListener('load', start);
+              }
             })();
         """
 

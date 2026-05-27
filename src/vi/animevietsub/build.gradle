@@ -1,7 +1,7 @@
 ext {
     extName = 'AnimeVietsub'
     extClass = '.AnimeVietsub'
-    extVersionCode = 8
+    extVersionCode = 1
 }
 
 apply plugin: "kei.plugins.extension.legacy"

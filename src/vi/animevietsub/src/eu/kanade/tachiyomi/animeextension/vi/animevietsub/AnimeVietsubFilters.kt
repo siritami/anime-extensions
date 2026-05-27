@@ -19,15 +19,12 @@ object AnimeVietsubFilters {
     fun buildFilterList(groups: List<FilterGroup>): AnimeFilterList {
         if (groups.isEmpty()) {
             return AnimeFilterList(
-                AnimeFilter.Header("Nhấn 'Đặt lại' để tải bộ lọc"),
+                AnimeFilter.Header("Nhấn \"Đặt lại\" để làm mới bộ lọc"),
             )
         }
 
-        val filters = mutableListOf<AnimeFilter<*>>(
-            AnimeFilter.Header("Lọc theo menu trên trang chủ AnimeVietsub."),
-        )
-        groups.forEach { group ->
-            filters.add(PathFilter(group.title, group.options))
+        val filters = groups.map { group ->
+            PathFilter(group.title, group.options)
         }
         return AnimeFilterList(filters)
     }
