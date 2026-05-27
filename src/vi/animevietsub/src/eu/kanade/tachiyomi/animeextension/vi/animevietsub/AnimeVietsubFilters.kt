@@ -145,12 +145,12 @@ object AnimeVietsubFilters {
 
     open class PathFilter(
         name: String,
-        private val values: Array<FilterOption>,
+        private val options: Array<FilterOption>,
     ) : AnimeFilter.Select<String>(
         name,
-        values.map { it.name }.toTypedArray(),
+        options.map { it.name }.toTypedArray(),
     ) {
-        fun selected(): FilterOption? = values[state].takeIf { it.path != null }
+        fun selected(): FilterOption? = options[state].takeIf { it.path != null }
     }
 
     class FilterOption(
