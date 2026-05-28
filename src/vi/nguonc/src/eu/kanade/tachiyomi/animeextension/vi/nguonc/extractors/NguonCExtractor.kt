@@ -91,6 +91,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         val server = ensureProxyRunning()
         server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
+        Log.e(TAG, "Rewritten playlist first 500: ${server.cachedPlaylist?.take(500)}")
 
         val proxyUrl = "http://127.0.0.1:${server.port}/playlist.m3u8"
         return listOf(Video(proxyUrl, "Video", proxyUrl))
@@ -287,6 +288,13 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 }
 
                 Log.e(TAG, "Segment OK size=${bytes.size} first8=${bytes.take(8).map { it.toInt() and 0xFF }}")
+                // Verify TS alignment: check sync bytes at 0, 188, 376
+                if (bytes.size > 376) {
+                    val b0 = bytes[0].toInt() and 0xFF
+                    val b188 = bytes[188].toInt() and 0xFF
+                    val b376 = bytes[376].toInt() and 0xFF
+                    Log.e(TAG, "TS sync check: [0]=0x${"%02X".format(b0)} [188]=0x${"%02X".format(b188)} [376]=0x${"%02X".format(b376)} valid=${b0 == 0x47 && b188 == 0x47 && b376 == 0x47}")
+                }
 
                 val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                     bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
