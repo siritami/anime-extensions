@@ -39,6 +39,29 @@ class NguonC :
 
     override val supportsLatest = true
 
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
+        .apply {
+            build()["user-agent"]?.let { userAgent ->
+                set("user-agent", userAgent.replace(WEBVIEW_TOKEN_REGEX, ")"))
+            }
+        }
+
+    override val client = network.client.newBuilder()
+        .addInterceptor { chain ->
+            val request = chain.request()
+            if (request.url.host.contains("streamc.xyz")) {
+                chain.proceed(
+                    request.newBuilder()
+                        .header("User-Agent", headers["user-agent"] ?: "")
+                        .build(),
+                )
+            } else {
+                chain.proceed(request)
+            }
+        }
+        .build()
+
     private val preferences: SharedPreferences = getPreferences {
         getString(DEFAULT_BASE_URL_PREF, null).let { prefDefaultBaseUrl ->
             if (prefDefaultBaseUrl != defaultBaseUrl) {
@@ -50,7 +73,7 @@ class NguonC :
         }
     }
 
-    private val extractor by lazy { NguonCExtractor() }
+    private val extractor by lazy { NguonCExtractor(client) }
 
     // ============================== Popular ===============================
 
@@ -216,5 +239,6 @@ class NguonC :
         private const val BASE_URL_PREF_TITLE = "Ghi đè URL cơ sở"
         private const val BASE_URL_PREF_SUMMARY =
             "Dành cho sử dụng tạm thời, cập nhật tiện ích sẽ xóa cài đặt."
+        private val WEBVIEW_TOKEN_REGEX = Regex("""\s*;\s*wv\)""")
     }
 }
