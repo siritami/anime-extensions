@@ -161,14 +161,12 @@ class NguonC :
 
     // ============================== Video =================================
 
-    override fun videoListRequest(episode: SEpisode): Request {
-        return GET(
-            episode.url,
-            headers.newBuilder()
-                .set("Referer", "$baseUrl/")
-                .build(),
-        )
-    }
+    override fun videoListRequest(episode: SEpisode): Request = GET(
+        episode.url,
+        headers.newBuilder()
+            .set("Referer", "$baseUrl/")
+            .build(),
+    )
 
     override fun videoListParse(response: Response): List<Video> {
         val embedUrl = response.request.url.toString()

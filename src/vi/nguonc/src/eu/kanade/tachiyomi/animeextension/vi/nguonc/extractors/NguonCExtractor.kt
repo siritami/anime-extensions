@@ -24,8 +24,10 @@ class NguonCExtractor(private val client: OkHttpClient) {
         val m3u8Url = "https://$host/$sUb.m3u8"
 
         val videoHeaders = Headers.headersOf(
-            "Referer", embedUrl,
-            "Origin", "https://$host",
+            "Referer",
+            embedUrl,
+            "Origin",
+            "https://$host",
         )
 
         return playlistUtils.extractFromHls(
