@@ -1,34 +1,71 @@
 package eu.kanade.tachiyomi.animeextension.vi.nguonc.extractors
 
-import android.util.Base64
+import android.annotation.SuppressLint
+import android.app.Application
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Headers
 import okhttp3.OkHttpClient
-import org.json.JSONObject
+import uy.kohesive.injekt.injectLazy
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
-class NguonCExtractor(private val client: OkHttpClient) {
+class NguonCExtractor(private val client: OkHttpClient, private val headers: Headers) {
+
+    private val context: Application by injectLazy()
+    private val handler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var proxy: HlsProxyServer? = null
 
-    fun videosFromHtml(html: String, embedUrl: String): List<Video> {
-        val obfEncoded = OBF_REGEX.find(html)?.groupValues?.get(1)
-            ?: return emptyList()
+    @SuppressLint("SetJavaScriptEnabled")
+    fun videosFromUrl(embedUrl: String): List<Video> {
+        val latch = CountDownLatch(1)
+        val bridge = JsBridge(latch)
+        val bridgeName = generateBridgeName()
+        val script = EXTRACT_SCRIPT_TEMPLATE.replace("__BRIDGE__", bridgeName)
+        var webView: WebView? = null
 
-        val decoded = String(Base64.decode(obfEncoded, Base64.DEFAULT))
-        val json = JSONObject(decoded)
-        val sUb = json.getString("sUb")
+        handler.post {
+            val wv = WebView(context)
+            webView = wv
 
-        val host = embedUrl.toHttpUrl().host
-        val m3u8Url = "https://$host/$sUb.m3u8"
+            with(wv.settings) {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = headers["user-agent"]
+            }
 
-        val m3u8Content = client.newCall(GET(m3u8Url)).execute().body.string()
+            wv.addJavascriptInterface(bridge, bridgeName)
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    view?.evaluateJavascript(script, null)
+                }
+            }
+
+            wv.loadUrl(embedUrl)
+        }
+
+        latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
+
+        handler.post {
+            webView?.stopLoading()
+            webView?.destroy()
+            webView = null
+        }
+
+        val m3u8Content = bridge.m3u8Content ?: return emptyList()
 
         val server = ensureProxyRunning()
         server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port)
@@ -46,12 +83,33 @@ class NguonCExtractor(private val client: OkHttpClient) {
         }
     }
 
+    private fun generateBridgeName(): String {
+        val pool = ('a'..'z') + ('A'..'Z')
+        return (1..(10..20).random()).map { pool.random() }.joinToString("")
+    }
+
     private fun ensureProxyRunning(): HlsProxyServer {
         proxy?.let { if (!it.isClosed) return it }
         val server = HlsProxyServer(client)
         server.start()
         proxy = server
         return server
+    }
+
+    private class JsBridge(private val latch: CountDownLatch) {
+        @Volatile var m3u8Content: String? = null
+
+        @JavascriptInterface
+        fun onM3u8(content: String) {
+            m3u8Content = content
+            latch.countDown()
+        }
+
+        @JavascriptInterface
+        fun onError(msg: String) {
+            Log.e(TAG, "JS error: $msg")
+            latch.countDown()
+        }
     }
 
     private class HlsProxyServer(private val httpClient: OkHttpClient) {
@@ -135,7 +193,27 @@ class NguonCExtractor(private val client: OkHttpClient) {
     }
 
     companion object {
+        private const val TAG = "NguonCExtractor"
+        private const val TIMEOUT_SEC = 15L
         private const val PNG_HEADER_SIZE = 127
-        private val OBF_REGEX = Regex("""data-obf="([^"]+)""")
+
+        private const val EXTRACT_SCRIPT_TEMPLATE = """(function() {
+    try {
+        var el = document.querySelector('[data-obf]');
+        if (!el) { __BRIDGE__.onError('no data-obf'); return; }
+        var decoded = JSON.parse(atob(el.getAttribute('data-obf')));
+        var m3u8Url = window.location.origin + '/' + decoded.sUb + '.m3u8';
+        fetch(m3u8Url).then(function(r) {
+            if (!r.ok) { __BRIDGE__.onError('fetch ' + r.status); return; }
+            return r.text();
+        }).then(function(text) {
+            if (text) __BRIDGE__.onM3u8(text);
+        }).catch(function(e) {
+            __BRIDGE__.onError(e.toString());
+        });
+    } catch(e) {
+        __BRIDGE__.onError(e.toString());
+    }
+})();"""
     }
 }

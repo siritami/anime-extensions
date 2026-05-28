@@ -47,21 +47,6 @@ class NguonC :
             }
         }
 
-    override val client = network.client.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            if (request.url.host.contains("streamc.xyz")) {
-                chain.proceed(
-                    request.newBuilder()
-                        .header("User-Agent", headers["user-agent"] ?: "")
-                        .build(),
-                )
-            } else {
-                chain.proceed(request)
-            }
-        }
-        .build()
-
     private val preferences: SharedPreferences = getPreferences {
         getString(DEFAULT_BASE_URL_PREF, null).let { prefDefaultBaseUrl ->
             if (prefDefaultBaseUrl != defaultBaseUrl) {
@@ -73,7 +58,7 @@ class NguonC :
         }
     }
 
-    private val extractor by lazy { NguonCExtractor(client) }
+    private val extractor by lazy { NguonCExtractor(client, headers) }
 
     // ============================== Popular ===============================
 
@@ -193,8 +178,7 @@ class NguonC :
 
     override fun videoListParse(response: Response): List<Video> {
         val embedUrl = response.request.url.toString()
-        val html = response.body.string()
-        return extractor.videosFromHtml(html, embedUrl)
+        return extractor.videosFromUrl(embedUrl)
     }
 
     override fun getEpisodeUrl(episode: SEpisode): String = episode.url
