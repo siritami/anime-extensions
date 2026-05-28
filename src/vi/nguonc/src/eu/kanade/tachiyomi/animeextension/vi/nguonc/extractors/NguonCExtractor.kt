@@ -130,7 +130,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return segFetcher.fetch(url, bridge, wv, handler)
     }
 
-
     private fun generateBridgeName(): String {
         val pool = ('a'..'z') + ('A'..'Z')
         return (1..(10..20).random()).map { pool.random() }.joinToString("")
