@@ -37,15 +37,14 @@ class NguonCExtractor(private val client: OkHttpClient) {
         return listOf(Video(proxyUrl, "Video", proxyUrl))
     }
 
-    private fun rewriteForProxy(m3u8: String, port: Int): String =
-        m3u8.lines().joinToString("\n") { line ->
-            val trimmed = line.trim()
-            if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
-                "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
-            } else {
-                line
-            }
+    private fun rewriteForProxy(m3u8: String, port: Int): String = m3u8.lines().joinToString("\n") { line ->
+        val trimmed = line.trim()
+        if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
+            "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
+        } else {
+            line
         }
+    }
 
     private fun ensureProxyRunning(): HlsProxyServer {
         proxy?.let { if (!it.isClosed) return it }
@@ -131,9 +130,8 @@ class NguonCExtractor(private val client: OkHttpClient) {
             output.flush()
         }
 
-        private fun isPng(bytes: ByteArray): Boolean =
-            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
-                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+        private fun isPng(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
     }
 
     companion object {
