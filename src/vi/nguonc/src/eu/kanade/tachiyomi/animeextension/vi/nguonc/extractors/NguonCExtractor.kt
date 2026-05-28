@@ -83,12 +83,13 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         val baseUrl = bridge.m3u8BaseUrl ?: ""
-        Log.d(TAG, "m3u8 base: $baseUrl")
+        Log.e(TAG, "m3u8 base: $baseUrl")
+        Log.e(TAG, "m3u8 first 300: ${m3u8Content.take(300)}")
 
         // Navigate WebView to CDN origin so segment fetches are same-origin (bypass CORS)
         val cdnOrigin = extractCdnOrigin(m3u8Content, baseUrl)
         if (cdnOrigin != null) {
-            Log.d(TAG, "Switching WebView origin to: $cdnOrigin")
+            Log.e(TAG, "Switching WebView origin to: $cdnOrigin")
             val navLatch = CountDownLatch(1)
             handler.post {
                 activeWebView?.webViewClient = object : WebViewClient() {
@@ -116,10 +117,18 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     // Fetch a segment via the active WebView's fetch() API (bypasses TLS fingerprinting)
     fun fetchSegment(url: String): ByteArray? {
-        val wv = activeWebView ?: return null
-        val bridgeName = segFetcher.bridgeName ?: return null
-
-        return segFetcher.fetch(url, bridgeName, wv, handler)
+        val wv = activeWebView
+        if (wv == null) {
+            Log.e(TAG, "fetchSegment: activeWebView is null")
+            return null
+        }
+        val bridge = segFetcher.bridgeName
+        if (bridge == null) {
+            Log.e(TAG, "fetchSegment: bridgeName is null")
+            return null
+        }
+        Log.e(TAG, "fetchSegment: $url")
+        return segFetcher.fetch(url, bridge, wv, handler)
     }
 
     private fun extractCdnOrigin(m3u8: String, baseUrl: String): String? {
@@ -311,7 +320,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     return
                 }
 
-                Log.d(TAG, "Segment OK size=${bytes.size} first4=${bytes.take(4).map { it.toInt() and 0xFF }}")
+                Log.e(TAG, "Segment OK size=${bytes.size} first8=${bytes.take(8).map { it.toInt() and 0xFF }}")
 
                 val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                     bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
