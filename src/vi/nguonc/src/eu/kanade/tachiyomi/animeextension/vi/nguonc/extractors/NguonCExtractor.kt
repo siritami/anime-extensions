@@ -85,6 +85,28 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val baseUrl = bridge.m3u8BaseUrl ?: ""
         Log.d(TAG, "m3u8 base: $baseUrl")
 
+        // Navigate WebView to CDN origin so segment fetches are same-origin (bypass CORS)
+        val cdnOrigin = extractCdnOrigin(m3u8Content, baseUrl)
+        if (cdnOrigin != null) {
+            Log.d(TAG, "Switching WebView origin to: $cdnOrigin")
+            val navLatch = CountDownLatch(1)
+            handler.post {
+                activeWebView?.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        navLatch.countDown()
+                    }
+                }
+                activeWebView?.loadDataWithBaseURL(
+                    cdnOrigin,
+                    "<html></html>",
+                    "text/html",
+                    "UTF-8",
+                    null,
+                )
+            }
+            navLatch.await(5, TimeUnit.SECONDS)
+        }
+
         val server = ensureProxyRunning()
         server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
 
@@ -98,6 +120,21 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val bridgeName = segFetcher.bridgeName ?: return null
 
         return segFetcher.fetch(url, bridgeName, wv, handler)
+    }
+
+    private fun extractCdnOrigin(m3u8: String, baseUrl: String): String? {
+        val firstSeg = m3u8.lines().firstOrNull {
+            it.isNotBlank() && !it.startsWith("#")
+        }?.trim() ?: return null
+        val url = when {
+            firstSeg.startsWith("http") -> firstSeg
+            firstSeg.startsWith("/") -> baseUrl.split("/").take(3).joinToString("/") + firstSeg
+            else -> baseUrl + firstSeg
+        }
+        val origin = url.split("/").take(3).joinToString("/")
+        // Only switch if it's a different origin
+        val embedOrigin = baseUrl.split("/").take(3).joinToString("/")
+        return if (origin != embedOrigin) origin else null
     }
 
     private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String = m3u8.lines().joinToString("\n") { line ->
@@ -185,7 +222,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     webView.evaluateJavascript(script, null)
                 }
 
-                latch.await(SEGMENT_TIMEOUT_SEC, TimeUnit.SECONDS)
+                val completed = latch.await(SEGMENT_TIMEOUT_SEC, TimeUnit.SECONDS)
+                if (!completed) Log.e(TAG, "Segment fetch timed out: $url")
+                if (segmentError != null) Log.e(TAG, "Segment error for: $url -> $segmentError")
                 return segmentData
             }
         }
