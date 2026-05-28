@@ -41,6 +41,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         // Store segment bridge name for fetch scripts
         segFetcher.bridgeName = segBridgeName
 
+        // Abort any pending segment fetches from previous video
+        segFetcher.abort()
+
         handler.post {
             // Destroy previous WebView if any
             activeWebView?.let {
@@ -108,6 +111,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         Log.e(TAG, "Total segments: ${segmentUrls.size}")
 
         val server = ensureProxyRunning()
+        server.reset()
         server.segmentUrls = segmentUrls
 
         // Build rewritten m3u8 playlist
@@ -190,6 +194,13 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         @Volatile private var segmentLatch: CountDownLatch? = null
 
+        @Volatile private var aborted = false
+
+        fun abort() {
+            aborted = true
+            segmentLatch?.countDown()
+        }
+
         @JavascriptInterface
         fun onSegment(base64: String) {
             segmentData = Base64.decode(base64, Base64.DEFAULT)
@@ -205,6 +216,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         fun fetch(url: String, bridge: String, webView: WebView, handler: Handler): ByteArray? {
             synchronized(lock) {
+                if (aborted) {
+                    aborted = false
+                    return null
+                }
                 segmentData = null
                 segmentError = null
                 val latch = CountDownLatch(1)
@@ -273,6 +288,13 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         val port: Int get() = serverSocket?.localPort ?: 0
         val isClosed: Boolean get() = serverSocket?.isClosed != false
+
+        fun reset() {
+            segmentCache.clear()
+            tsHeader = null
+            cachedPlaylist = null
+            Log.e(TAG, "Proxy state reset")
+        }
 
         fun start() {
             val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -461,23 +483,29 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         private const val PNG_HEADER_SIZE = 127
 
         private const val EXTRACT_SCRIPT_TEMPLATE = """(function() {
-    try {
-        var el = document.querySelector('[data-obf]');
-        if (!el) { __BRIDGE__.onError('no data-obf'); return; }
-        var decoded = JSON.parse(atob(el.getAttribute('data-obf')));
-        var m3u8Url = window.location.origin + '/' + decoded.sUb + '.m3u8';
-        var baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
-        fetch(m3u8Url).then(function(r) {
-            if (!r.ok) { __BRIDGE__.onError('fetch ' + r.status); return; }
-            return r.text();
-        }).then(function(text) {
-            if (text) __BRIDGE__.onM3u8(text, baseUrl);
-        }).catch(function(e) {
+    function tryExtract(retries) {
+        try {
+            var el = document.querySelector('[data-obf]');
+            if (!el) {
+                if (retries > 0) { setTimeout(function() { tryExtract(retries - 1); }, 1000); return; }
+                __BRIDGE__.onError('no data-obf'); return;
+            }
+            var decoded = JSON.parse(atob(el.getAttribute('data-obf')));
+            var m3u8Url = window.location.origin + '/' + decoded.sUb + '.m3u8';
+            var baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+            fetch(m3u8Url).then(function(r) {
+                if (!r.ok) { __BRIDGE__.onError('fetch ' + r.status); return; }
+                return r.text();
+            }).then(function(text) {
+                if (text) __BRIDGE__.onM3u8(text, baseUrl);
+            }).catch(function(e) {
+                __BRIDGE__.onError(e.toString());
+            });
+        } catch(e) {
             __BRIDGE__.onError(e.toString());
-        });
-    } catch(e) {
-        __BRIDGE__.onError(e.toString());
+        }
     }
+    tryExtract(3);
 })();"""
     }
 }
