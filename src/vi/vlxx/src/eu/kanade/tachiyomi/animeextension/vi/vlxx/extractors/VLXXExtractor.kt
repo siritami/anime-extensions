@@ -157,7 +157,7 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
                         writeHttp(output, 502, "text/plain", "Fetch failed".toByteArray())
                         return
                     }
-                    data = bytes
+                    data = stripPngHeader(bytes)
                     segmentCache[idx] = data
                 }
 
@@ -168,7 +168,7 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
                         try {
                             val nextBytes = extractor.fetchSegmentBytes(segmentUrls[idx + 1])
                             if (nextBytes != null) {
-                                segmentCache[idx + 1] = nextBytes
+                                segmentCache[idx + 1] = stripPngHeader(nextBytes)
                             }
                         } catch (_: Exception) {}
                     }.start()
@@ -179,6 +179,20 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
                 writeHttp(output, 502, "text/plain", "Error".toByteArray())
             }
         }
+
+        private fun stripPngHeader(bytes: ByteArray): ByteArray {
+            if (bytes.size < 8 || !isPng(bytes)) return bytes
+            for (i in 0 until minOf(bytes.size - 188, 500)) {
+                if (bytes[i] == TS_SYNC_BYTE && i + 188 < bytes.size && bytes[i + 188] == TS_SYNC_BYTE) {
+                    return bytes.copyOfRange(i, bytes.size)
+                }
+            }
+            return bytes
+        }
+
+        private fun isPng(bytes: ByteArray): Boolean = bytes.size > 4 &&
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
 
         private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
             val status = if (code == 200) "OK" else "Error"
@@ -194,5 +208,6 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
 
     companion object {
         private val FILE_REGEX = Regex(""""file"\s*:\s*"([^"]+)"""")
+        private const val TS_SYNC_BYTE = 0x47.toByte()
     }
 }
