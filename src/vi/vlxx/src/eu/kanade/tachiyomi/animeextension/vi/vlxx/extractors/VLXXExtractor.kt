@@ -76,8 +76,9 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
 
     internal fun fetchSegmentBytes(url: String): ByteArray? = try {
         val request = Request.Builder().url(url).headers(headers).build()
-        val resp = client.newCall(request).execute()
-        if (resp.isSuccessful) resp.body.bytes() else null
+        client.newCall(request).execute().use { resp ->
+            if (resp.isSuccessful) resp.body.bytes() else null
+        }
     } catch (_: Exception) {
         null
     }
