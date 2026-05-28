@@ -9,8 +9,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URLDecoder
-import java.net.URLEncoder
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -20,11 +18,11 @@ class HentaiZExtractor(
     private val client: OkHttpClient,
     private val headers: Headers,
 ) {
-    @Volatile private var proxyServer: SegmentProxyServer? = null
+    @Volatile private var proxyServer: PlaylistProxyServer? = null
 
-    private fun ensureProxyRunning(): SegmentProxyServer {
+    private fun ensureProxyRunning(): PlaylistProxyServer {
         proxyServer?.let { if (!it.isClosed) return it }
-        val proxy = SegmentProxyServer(client, headers)
+        val proxy = PlaylistProxyServer()
         proxy.start()
         proxyServer = proxy
         return proxy
@@ -61,7 +59,7 @@ class HentaiZExtractor(
                     ?: videoData.variantFolders.firstOrNull() ?: ""
                 val baseSegUrl = "${videoData.segDomain}/${videoData.id}/$folder/"
 
-                val rewrittenPlaylist = rewritePlaylist(playlist, baseSegUrl, proxy.port)
+                val rewrittenPlaylist = rewritePlaylist(playlist, baseSegUrl)
                 val playlistKey = "v${variantIdx}_$quality"
                 proxy.cachePlaylist(playlistKey, rewrittenPlaylist)
 
@@ -74,7 +72,7 @@ class HentaiZExtractor(
         if (videos.isEmpty() && videoData.m3u8Playlists.isNotEmpty()) {
             val folder = videoData.variantFolders.firstOrNull() ?: ""
             val baseSegUrl = "${videoData.segDomain}/${videoData.id}/$folder/"
-            val rewrittenPlaylist = rewritePlaylist(videoData.m3u8Playlists[0], baseSegUrl, proxy.port)
+            val rewrittenPlaylist = rewritePlaylist(videoData.m3u8Playlists[0], baseSegUrl)
             proxy.cachePlaylist("default", rewrittenPlaylist)
 
             val proxyUrl = "http://127.0.0.1:${proxy.port}/playlist/default.m3u8"
@@ -84,11 +82,10 @@ class HentaiZExtractor(
         return videos
     }
 
-    private fun rewritePlaylist(playlist: String, baseSegUrl: String, proxyPort: Int): String = playlist.lines().joinToString("\n") { line ->
+    private fun rewritePlaylist(playlist: String, baseSegUrl: String): String = playlist.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-            val fullUrl = baseSegUrl + trimmed
-            "http://127.0.0.1:$proxyPort/seg?u=${URLEncoder.encode(fullUrl, "UTF-8")}"
+            baseSegUrl + trimmed
         } else {
             line
         }
@@ -165,10 +162,7 @@ class HentaiZExtractor(
         val id: String,
     )
 
-    private class SegmentProxyServer(
-        private val httpClient: OkHttpClient,
-        private val headers: Headers,
-    ) {
+    private class PlaylistProxyServer {
         private var serverSocket: ServerSocket? = null
         private val playlistCache = mutableMapOf<String, String>()
 
@@ -198,7 +192,7 @@ class HentaiZExtractor(
 
         private fun handleConnection(socket: Socket) {
             try {
-                socket.soTimeout = 60_000
+                socket.soTimeout = 30_000
                 val input = socket.getInputStream().bufferedReader()
                 val requestLine = input.readLine() ?: return
                 while (input.readLine()?.isEmpty() == false) { /* consume headers */ }
@@ -206,10 +200,10 @@ class HentaiZExtractor(
                 val path = requestLine.split(" ").getOrNull(1) ?: return
                 val output = socket.getOutputStream()
 
-                when {
-                    path.startsWith("/playlist/") -> servePlaylist(path, output)
-                    path.startsWith("/seg?u=") -> serveSegment(path, output)
-                    else -> writeHttp(output, 404, "text/plain", "Not Found".toByteArray())
+                if (path.startsWith("/playlist/")) {
+                    servePlaylist(path, output)
+                } else {
+                    writeHttp(output, 404, "text/plain", "Not Found".toByteArray())
                 }
             } catch (_: Exception) {
             } finally {
@@ -229,28 +223,6 @@ class HentaiZExtractor(
             }
         }
 
-        private fun serveSegment(path: String, output: OutputStream) {
-            val encodedUrl = path.substringAfter("u=")
-            val url = URLDecoder.decode(encodedUrl, "UTF-8")
-
-            val reqBuilder = Request.Builder().url(url)
-            headers.names().forEach { name ->
-                if (!name.equals("Host", ignoreCase = true)) {
-                    headers[name]?.let { reqBuilder.header(name, it) }
-                }
-            }
-
-            val response = httpClient.newCall(reqBuilder.build()).execute()
-            val bytes = response.body.bytes()
-
-            val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
-                bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
-            } else {
-                bytes
-            }
-            writeHttp(output, 200, "video/mp2t", result)
-        }
-
         private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
             val status = if (code == 200) "OK" else "Error"
             val header = "HTTP/1.1 $code $status\r\n" +
@@ -262,16 +234,10 @@ class HentaiZExtractor(
             output.write(body)
             output.flush()
         }
-
-        private fun isPng(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() &&
-            bytes[1] == 0x50.toByte() &&
-            bytes[2] == 0x4E.toByte() &&
-            bytes[3] == 0x47.toByte()
     }
 
     companion object {
         private const val MIMIX_API = "https://x.mimix.cc/watch/"
-        private const val PNG_HEADER_SIZE = 127
         private val VIDEO_ID_REGEX = Regex("""[?&]v=([a-f0-9-]+)""", RegexOption.IGNORE_CASE)
         private val RESOLUTION_REGEX = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
     }

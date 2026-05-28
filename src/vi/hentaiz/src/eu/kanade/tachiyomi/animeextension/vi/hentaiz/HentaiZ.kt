@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.vi.hentaiz
 
 import android.content.SharedPreferences
+import android.text.Html
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.vi.hentaiz.extractors.HentaiZExtractor
@@ -155,8 +156,7 @@ class HentaiZ :
             }
 
             description = episode.optString("description", "")
-                .replace(Regex("<br\\s*/?>"), "\n")
-                .replace(Regex("<[^>]+>"), "")
+                .let { Html.fromHtml(it, Html.FROM_HTML_MODE_LEGACY).toString() }
                 .trim()
 
             status = SAnime.COMPLETED
@@ -174,60 +174,54 @@ class HentaiZ :
         val data = parseSvelteData(response) ?: return emptyList()
         val episode = data.optJSONObject("episode") ?: return emptyList()
         val seriesTitle = episode.optString("title", "")
+        val currentSlug = response.request.url.pathSegments.getOrNull(1) ?: ""
+        val baseSlug = currentSlug.replace(TRAILING_NUM_REGEX, "")
 
-        if (seriesTitle.isBlank()) {
-            return listOf(createEpisodeFromData(episode, response.request.url.toString()))
+        if (seriesTitle.isBlank() || baseSlug.isEmpty()) {
+            return listOf(createFallbackEpisode(currentSlug))
         }
 
-        val searchUrl = "$baseUrl/browse/__data.json".toHttpUrl().newBuilder()
-            .addQueryParameter("q", seriesTitle)
-            .addQueryParameter("sort", "publishedAt_desc")
-            .addQueryParameter("page", "1")
-            .addQueryParameter("limit", "100")
-            .addQueryParameter("animationType", "ALL")
-            .addQueryParameter("contentRating", "ALL")
-            .addQueryParameter("isTrailer", "ALL")
-            .addQueryParameter("year", "ALL")
-            .build()
-            .toString()
+        val seriesEpisodes = try {
+            val searchUrl = "$baseUrl/browse/__data.json".toHttpUrl().newBuilder()
+                .addQueryParameter("q", seriesTitle)
+                .addQueryParameter("sort", "publishedAt_desc")
+                .addQueryParameter("page", "1")
+                .addQueryParameter("limit", "24")
+                .addQueryParameter("animationType", "ALL")
+                .addQueryParameter("contentRating", "ALL")
+                .addQueryParameter("isTrailer", "ALL")
+                .addQueryParameter("year", "ALL")
+                .build()
+                .toString()
 
-        val searchResponse = client.newCall(GET(searchUrl, headers)).execute()
-        val searchData = parseSvelteData(searchResponse)
-        val episodes = searchData?.optJSONArray("episodes")
+            val searchResponse = client.newCall(GET(searchUrl, headers)).execute()
+            val rawText = searchResponse.body.string()
 
-        if (episodes == null || episodes.length() == 0) {
-            return listOf(createEpisodeFromData(episode, response.request.url.toString()))
-        }
-
-        val seriesEpisodes = mutableListOf<SEpisode>()
-        for (i in 0 until episodes.length()) {
-            val ep = episodes.optJSONObject(i) ?: continue
-            if (ep.optString("title", "") != seriesTitle) continue
-
-            val slug = ep.optString("slug", "").takeIf { it.isNotEmpty() } ?: continue
-            val epNum = ep.optInt("episodeNumber", 1)
-
-            seriesEpisodes.add(
-                SEpisode.create().apply {
-                    url = "/watch/$slug"
-                    name = "Tập $epNum"
-                    episode_number = epNum.toFloat()
-                },
-            )
+            val slugRegex = Regex(""""(${Regex.escape(baseSlug)}-(\d+))"""")
+            slugRegex.findAll(rawText)
+                .map { it.groupValues[1] to it.groupValues[2].toInt() }
+                .distinctBy { it.first }
+                .map { (slug, epNum) ->
+                    SEpisode.create().apply {
+                        url = "/watch/$slug"
+                        name = "Tập $epNum"
+                        episode_number = epNum.toFloat()
+                    }
+                }
+                .toList()
+        } catch (_: Exception) {
+            emptyList()
         }
 
         if (seriesEpisodes.isEmpty()) {
-            return listOf(createEpisodeFromData(episode, response.request.url.toString()))
+            return listOf(createFallbackEpisode(currentSlug))
         }
 
         return seriesEpisodes.sortedByDescending { it.episode_number }
     }
 
-    private fun createEpisodeFromData(episode: JSONObject, requestUrl: String): SEpisode {
-        val slug = requestUrl.toHttpUrl().pathSegments.getOrNull(1) ?: ""
-        val numMatch = Regex("""(\d+)$""").find(slug)
-        val epNum = numMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
+    private fun createFallbackEpisode(slug: String): SEpisode {
+        val epNum = TRAILING_NUM_REGEX.find(slug)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         return SEpisode.create().apply {
             url = "/watch/$slug"
             name = "Tập $epNum"
@@ -284,10 +278,15 @@ class HentaiZ :
     private fun parseSvelteData(response: Response): JSONObject? {
         val json = JSONObject(response.body.string())
         val nodes = json.optJSONArray("nodes") ?: return null
-        val pageNode = nodes.optJSONObject(2) ?: return null
-        if (pageNode.optString("type") == "error") return null
-        val dataArr = pageNode.optJSONArray("data") ?: return null
-        return decodeSvelteData(dataArr)
+        // Try nodes from last to first to find the page data node
+        for (i in nodes.length() - 1 downTo 0) {
+            val node = nodes.optJSONObject(i) ?: continue
+            if (node.optString("type") == "error") return null
+            val dataArr = node.optJSONArray("data") ?: continue
+            val result = decodeSvelteData(dataArr)
+            if (result != null) return result
+        }
+        return null
     }
 
     private fun decodeSvelteData(data: JSONArray): JSONObject? {
@@ -400,5 +399,6 @@ class HentaiZ :
             "Dành cho sử dụng tạm thời, cập nhật tiện ích sẽ xóa cài đặt."
 
         private val WEBVIEW_TOKEN_REGEX = Regex(""";\s*wv\)""")
+        private val TRAILING_NUM_REGEX = Regex("""-?(\d+)$""")
     }
 }
