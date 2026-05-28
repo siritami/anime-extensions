@@ -74,14 +74,12 @@ class VLXXExtractor(private val client: OkHttpClient, private val headers: Heade
         return server
     }
 
-    internal fun fetchSegmentBytes(url: String): ByteArray? {
-        return try {
-            val request = Request.Builder().url(url).headers(headers).build()
-            val resp = client.newCall(request).execute()
-            if (resp.isSuccessful) resp.body.bytes() else null
-        } catch (_: Exception) {
-            null
-        }
+    internal fun fetchSegmentBytes(url: String): ByteArray? = try {
+        val request = Request.Builder().url(url).headers(headers).build()
+        val resp = client.newCall(request).execute()
+        if (resp.isSuccessful) resp.body.bytes() else null
+    } catch (_: Exception) {
+        null
     }
 
     private class HlsProxyServer(private val extractor: VLXXExtractor) {
