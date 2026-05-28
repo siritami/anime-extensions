@@ -1,16 +1,12 @@
 package eu.kanade.tachiyomi.animeextension.vi.nguonc.extractors
 
 import android.util.Base64
-import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Video
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 import org.json.JSONObject
 
-class NguonCExtractor(private val client: OkHttpClient) {
-
-    private val playlistUtils by lazy { PlaylistUtils(client) }
+class NguonCExtractor {
 
     fun videosFromHtml(html: String, embedUrl: String): List<Video> {
         val obfEncoded = OBF_REGEX.find(html)?.groupValues?.get(1)
@@ -25,16 +21,11 @@ class NguonCExtractor(private val client: OkHttpClient) {
 
         val videoHeaders = Headers.headersOf(
             "Referer",
-            embedUrl,
-            "Origin",
-            "https://$host",
+            "https://$host/",
         )
 
-        return playlistUtils.extractFromHls(
-            m3u8Url,
-            referer = embedUrl,
-            videoHeaders = videoHeaders,
-            masterHeaders = videoHeaders,
+        return listOf(
+            Video(m3u8Url, "Video", m3u8Url, headers = videoHeaders),
         )
     }
 

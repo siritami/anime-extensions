@@ -50,7 +50,7 @@ class NguonC :
         }
     }
 
-    private val extractor by lazy { NguonCExtractor(client) }
+    private val extractor by lazy { NguonCExtractor() }
 
     // ============================== Popular ===============================
 
@@ -186,7 +186,7 @@ class NguonC :
                 val linkEl = row.selectFirst("td a.ajax-load")!!
                 title = linkEl.selectFirst("h3")!!.text()
                 setUrlWithoutDomain(linkEl.absUrl("href"))
-                thumbnail_url = row.selectFirst("td img")?.absUrl("src")
+                thumbnail_url = row.selectFirst("td img")?.absUrl("data-src")
             }
         }
 
