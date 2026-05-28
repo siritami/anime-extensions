@@ -17,7 +17,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URLDecoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -90,10 +89,12 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         // that the CDN expects (same as the page's own HLS player would)
 
         // Parse segment URLs from m3u8
-        val segmentUrls = m3u8Content.lines().mapNotNull { line ->
+        val segmentUrls = mutableListOf<String>()
+        val lines = m3u8Content.lines()
+        for (line in lines) {
             val trimmed = line.trim()
             if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                when {
+                val url = when {
                     trimmed.startsWith("http") -> trimmed
                     trimmed.startsWith("/") -> {
                         val origin = baseUrl.split("/").take(3).joinToString("/")
@@ -101,8 +102,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     }
                     else -> "$baseUrl$trimmed"
                 }
-            } else {
-                null
+                segmentUrls.add(url)
             }
         }
         Log.e(TAG, "Total segments: ${segmentUrls.size}")
@@ -110,8 +110,37 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val server = ensureProxyRunning()
         server.segmentUrls = segmentUrls
 
-        val streamUrl = "http://127.0.0.1:${server.port}/stream.ts"
-        return listOf(Video(streamUrl, "Video", streamUrl))
+        // Build rewritten m3u8 playlist
+        var segIdx = 0
+        val rewritten = buildString {
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.equals("#EXT-X-DISCONTINUITY", ignoreCase = true)) continue
+                if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                    appendLine("http://127.0.0.1:${server.port}/seg/${segIdx}.ts")
+                    segIdx++
+                } else {
+                    appendLine(line)
+                }
+            }
+            if (!this.contains("#EXT-X-ENDLIST")) appendLine("#EXT-X-ENDLIST")
+        }
+        server.cachedPlaylist = rewritten
+
+        // Pre-fetch first segment so HLS probe is instant
+        Thread {
+            val bytes = fetchSegment(segmentUrls[0])
+            if (bytes != null) {
+                val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
+                    bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+                } else bytes
+                server.segmentCache[0] = result
+                Log.e(TAG, "Pre-fetched seg 0: ${result.size} bytes")
+            }
+        }.start()
+
+        val proxyUrl = "http://127.0.0.1:${server.port}/playlist.m3u8"
+        return listOf(Video(proxyUrl, "Video", proxyUrl))
     }
 
     // Fetch a segment via the active WebView's fetch() API (bypasses TLS fingerprinting)
@@ -134,6 +163,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val pool = ('a'..'z') + ('A'..'Z')
         return (1..(10..20).random()).map { pool.random() }.joinToString("")
     }
+
+    private fun isPng(bytes: ByteArray): Boolean = bytes.size > 4 &&
+        bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+        bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
 
     private fun ensureProxyRunning(): HlsProxyServer {
         proxy?.let { if (!it.isClosed) return it }
@@ -229,6 +262,11 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         private var serverSocket: ServerSocket? = null
 
         @Volatile var segmentUrls: List<String> = emptyList()
+        @Volatile var cachedPlaylist: String? = null
+        val segmentCache = java.util.concurrent.ConcurrentHashMap<Int, ByteArray>()
+        // Cached PAT+PMT header extracted from first segment
+        @Volatile private var tsHeader: ByteArray? = null
+
         val port: Int get() = serverSocket?.localPort ?: 0
         val isClosed: Boolean get() = serverSocket?.isClosed != false
 
@@ -259,73 +297,141 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 val output = socket.getOutputStream()
 
                 when {
-                    path.startsWith("/stream") -> serveStream(socket, output)
-                    path.startsWith("/seg?u=") -> serveSegment(path, output)
+                    path == "/playlist.m3u8" -> servePlaylist(output)
+                    path.startsWith("/seg/") -> serveSegment(path, output)
                     else -> writeHttp(output, 404, "text/plain", "Not Found".toByteArray())
                 }
             } catch (_: Exception) {
             } finally {
                 try {
+                    socket.shutdownOutput()
                     socket.close()
                 } catch (_: Exception) {}
             }
         }
 
-        // Stream all segments as a single continuous TS stream
-        private fun serveStream(socket: Socket, output: OutputStream) {
-            socket.soTimeout = 0
-            val header = "HTTP/1.1 200 OK\r\n" +
-                "Content-Type: video/mp2t\r\n" +
-                "Connection: close\r\n\r\n"
-            output.write(header.toByteArray())
-            output.flush()
-
-            val urls = segmentUrls
-            Log.e(TAG, "Streaming ${urls.size} segments")
-            for ((idx, url) in urls.withIndex()) {
-                try {
-                    val bytes = extractor.fetchSegment(url)
-                    if (bytes == null) {
-                        Log.e(TAG, "Stream seg $idx null: $url")
-                        continue
-                    }
-                    val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
-                        bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
-                    } else {
-                        bytes
-                    }
-                    output.write(result)
-                    output.flush()
-                    if (idx < 3 || idx % 50 == 0) {
-                        Log.e(TAG, "Stream seg $idx OK size=${result.size}")
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Stream seg $idx error: ${e.message}")
-                    break
-                }
-            }
-            Log.e(TAG, "Stream complete")
+        private fun servePlaylist(output: OutputStream) {
+            val body = (cachedPlaylist ?: "#EXTM3U\n").toByteArray()
+            writeHttp(output, 200, "application/vnd.apple.mpegurl", body)
         }
 
         private fun serveSegment(path: String, output: OutputStream) {
-            val encodedUrl = path.substringAfter("u=")
-            val url = URLDecoder.decode(encodedUrl, "UTF-8")
+            // Path format: /seg/{index}.ts
+            val idx = path.removePrefix("/seg/").removeSuffix(".ts").toIntOrNull()
+            if (idx == null || idx < 0 || idx >= segmentUrls.size) {
+                writeHttp(output, 404, "text/plain", "Invalid segment".toByteArray())
+                return
+            }
+
             try {
-                val bytes = extractor.fetchSegment(url)
-                if (bytes == null) {
-                    writeHttp(output, 502, "text/plain", "Fetch failed".toByteArray())
-                    return
+                // Check cache first
+                var data = segmentCache[idx]
+                if (data == null) {
+                    val url = segmentUrls[idx]
+                    val bytes = extractor.fetchSegment(url)
+                    if (bytes == null) {
+                        writeHttp(output, 502, "text/plain", "Fetch failed".toByteArray())
+                        return
+                    }
+                    data = if (bytes.size > PNG_HEADER_SIZE && extractor.isPng(bytes)) {
+                        bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+                    } else bytes
+                    segmentCache[idx] = data
                 }
-                val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
-                    bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+
+                // Extract and cache TS header (PAT+PMT) from first segment
+                if (tsHeader == null && data.size > 188) {
+                    tsHeader = extractTsHeader(data)
+                }
+
+                // Prepend PAT+PMT so ffmpeg's inner demuxer finds streams immediately
+                val header = tsHeader
+                val body = if (header != null && !startsWithPat(data)) {
+                    header + data
                 } else {
-                    bytes
+                    data
                 }
-                writeHttp(output, 200, "video/mp2t", result)
+
+                Log.e(TAG, "Serve seg $idx size=${body.size}")
+                writeHttp(output, 200, "video/mp2t", body)
+
+                // Pre-fetch next segment in background
+                if (idx + 1 < segmentUrls.size && !segmentCache.containsKey(idx + 1)) {
+                    Thread {
+                        try {
+                            val nextUrl = segmentUrls[idx + 1]
+                            val nextBytes = extractor.fetchSegment(nextUrl)
+                            if (nextBytes != null) {
+                                val result = if (nextBytes.size > PNG_HEADER_SIZE && extractor.isPng(nextBytes)) {
+                                    nextBytes.copyOfRange(PNG_HEADER_SIZE, nextBytes.size)
+                                } else nextBytes
+                                segmentCache[idx + 1] = result
+                            }
+                        } catch (_: Exception) {}
+                    }.start()
+                }
+
+                // Evict old cache entries to save memory
+                if (idx > 3) segmentCache.remove(idx - 3)
             } catch (e: Exception) {
-                Log.e(TAG, "Segment exception: ${e.message}", e)
+                Log.e(TAG, "Segment $idx exception: ${e.message}")
                 writeHttp(output, 502, "text/plain", "Error".toByteArray())
             }
+        }
+
+        // Extract PAT + PMT packets from TS data
+        private fun extractTsHeader(data: ByteArray): ByteArray? {
+            var patPacket: ByteArray? = null
+            var pmtPid = -1
+            var pmtPacket: ByteArray? = null
+
+            val packetCount = minOf(data.size / 188, 200)
+            for (i in 0 until packetCount) {
+                val offset = i * 188
+                if (data[offset].toInt() and 0xFF != 0x47) continue
+                val pid = ((data[offset + 1].toInt() and 0x1F) shl 8) or (data[offset + 2].toInt() and 0xFF)
+                if (pid == 0 && patPacket == null) {
+                    patPacket = data.copyOfRange(offset, offset + 188)
+                    // Parse PMT PID from PAT payload
+                    val adaptFlag = (data[offset + 3].toInt() shr 4) and 0x03
+                    var payloadStart = offset + 4
+                    if (adaptFlag and 0x02 != 0) {
+                        payloadStart += 1 + (data[offset + 4].toInt() and 0xFF)
+                    }
+                    val pusi = (data[offset + 1].toInt() and 0x40) != 0
+                    if (pusi && payloadStart < offset + 188) {
+                        payloadStart += 1 + (data[payloadStart].toInt() and 0xFF)
+                    }
+                    // PAT table: skip table header (8 bytes), read program entries
+                    val tableStart = payloadStart
+                    if (tableStart + 12 < offset + 188) {
+                        val sectionLen = ((data[tableStart + 1].toInt() and 0x0F) shl 8) or (data[tableStart + 2].toInt() and 0xFF)
+                        val programStart = tableStart + 8
+                        val programEnd = tableStart + 3 + sectionLen - 4
+                        if (programStart + 4 <= minOf(programEnd, offset + 188)) {
+                            pmtPid = ((data[programStart + 2].toInt() and 0x1F) shl 8) or (data[programStart + 3].toInt() and 0xFF)
+                            Log.e(TAG, "PAT found at pkt $i, PMT PID=$pmtPid")
+                        }
+                    }
+                }
+                if (pmtPid > 0 && pid == pmtPid && pmtPacket == null) {
+                    pmtPacket = data.copyOfRange(offset, offset + 188)
+                    Log.e(TAG, "PMT found at pkt $i")
+                    break
+                }
+            }
+            if (patPacket == null) {
+                Log.e(TAG, "No PAT found in first 200 packets!")
+                return null
+            }
+            return if (pmtPacket != null) patPacket + pmtPacket else patPacket
+        }
+
+        private fun startsWithPat(data: ByteArray): Boolean {
+            if (data.size < 3) return false
+            if (data[0].toInt() and 0xFF != 0x47) return false
+            val pid = ((data[1].toInt() and 0x1F) shl 8) or (data[2].toInt() and 0xFF)
+            return pid == 0
         }
 
         private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
@@ -333,15 +439,11 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             val header = "HTTP/1.1 $code $status\r\n" +
                 "Content-Type: $contentType\r\n" +
                 "Content-Length: ${body.size}\r\n" +
-                "Access-Control-Allow-Origin: *\r\n" +
                 "Connection: close\r\n\r\n"
             output.write(header.toByteArray())
             output.write(body)
             output.flush()
         }
-
-        private fun isPng(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
-            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
     }
 
     companion object {
