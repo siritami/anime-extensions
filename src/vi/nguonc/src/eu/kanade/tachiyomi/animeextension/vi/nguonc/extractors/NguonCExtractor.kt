@@ -5,13 +5,14 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.network.GET
 import okhttp3.Headers
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import uy.kohesive.injekt.injectLazy
 import java.io.OutputStream
 import java.net.InetAddress
@@ -90,7 +91,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     private fun ensureProxyRunning(): HlsProxyServer {
         proxy?.let { if (!it.isClosed) return it }
-        val server = HlsProxyServer(client)
+        val server = HlsProxyServer(client, headers)
         server.start()
         proxy = server
         return server
@@ -112,7 +113,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
     }
 
-    private class HlsProxyServer(private val httpClient: OkHttpClient) {
+    private class HlsProxyServer(private val httpClient: OkHttpClient, private val headers: Headers) {
         private var serverSocket: ServerSocket? = null
 
         @Volatile var cachedPlaylist: String? = null
@@ -166,7 +167,17 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             val encodedUrl = path.substringAfter("u=")
             val url = URLDecoder.decode(encodedUrl, "UTF-8")
 
-            val response = httpClient.newCall(GET(url)).execute()
+            val reqBuilder = Request.Builder().url(url)
+            headers.names().forEach { name ->
+                if (!name.equals("Host", ignoreCase = true)) {
+                    headers[name]?.let { reqBuilder.header(name, it) }
+                }
+            }
+            val cookies = CookieManager.getInstance().getCookie(url)
+            if (!cookies.isNullOrBlank()) {
+                reqBuilder.header("Cookie", cookies)
+            }
+            val response = httpClient.newCall(reqBuilder.build()).execute()
             val bytes = response.body.bytes()
 
             val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
