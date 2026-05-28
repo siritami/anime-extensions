@@ -113,6 +113,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var m3u8Content: String? = null
+
         @Volatile var m3u8BaseUrl: String? = null
 
         @JavascriptInterface
