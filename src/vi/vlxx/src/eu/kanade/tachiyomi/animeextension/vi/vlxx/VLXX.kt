@@ -60,22 +60,19 @@ class VLXX :
 
     // ============================== Popular ===============================
 
-    override fun popularAnimeRequest(page: Int): Request =
-        GET("$baseUrl/phim-sex-hay/${if (page > 1) "$page/" else ""}", headers)
+    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/phim-sex-hay/${if (page > 1) "$page/" else ""}", headers)
 
     override fun popularAnimeParse(response: Response): AnimesPage = parseAnimesPage(response)
 
     // ============================== Latest ================================
 
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/${if (page > 1) "new/$page/" else ""}", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/${if (page > 1) "new/$page/" else ""}", headers)
 
     override fun latestUpdatesParse(response: Response): AnimesPage = parseAnimesPage(response)
 
     // ============================== Search ================================
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
-        GET("$baseUrl/search/$query/$page/", headers)
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET("$baseUrl/search/$query/$page/", headers)
 
     override fun searchAnimeParse(response: Response): AnimesPage = parseAnimesPage(response)
 
