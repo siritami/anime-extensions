@@ -67,18 +67,32 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         val m3u8Content = bridge.m3u8Content ?: return emptyList()
+        val baseUrl = bridge.m3u8BaseUrl ?: ""
+
+        Log.d(TAG, "m3u8 base: $baseUrl")
+        Log.d(TAG, "m3u8 content (first 500): ${m3u8Content.take(500)}")
 
         val server = ensureProxyRunning()
-        server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port)
+        server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
 
         val proxyUrl = "http://127.0.0.1:${server.port}/playlist.m3u8"
         return listOf(Video(proxyUrl, "Video", proxyUrl))
     }
 
-    private fun rewriteForProxy(m3u8: String, port: Int): String = m3u8.lines().joinToString("\n") { line ->
+    private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String = m3u8.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
-        if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
-            "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(trimmed, "UTF-8")}"
+        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+            val absoluteUrl = when {
+                trimmed.startsWith("http") -> trimmed
+                trimmed.startsWith("/") -> {
+                    val origin = baseUrl.substringBefore("/", "").let {
+                        baseUrl.split("/").take(3).joinToString("/")
+                    }
+                    "$origin$trimmed"
+                }
+                else -> "$baseUrl$trimmed"
+            }
+            "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(absoluteUrl, "UTF-8")}"
         } else {
             line
         }
@@ -99,10 +113,12 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     private class JsBridge(private val latch: CountDownLatch) {
         @Volatile var m3u8Content: String? = null
+        @Volatile var m3u8BaseUrl: String? = null
 
         @JavascriptInterface
-        fun onM3u8(content: String) {
+        fun onM3u8(content: String, baseUrl: String) {
             m3u8Content = content
+            m3u8BaseUrl = baseUrl
             latch.countDown()
         }
 
@@ -167,25 +183,38 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             val encodedUrl = path.substringAfter("u=")
             val url = URLDecoder.decode(encodedUrl, "UTF-8")
 
-            val reqBuilder = Request.Builder().url(url)
-            headers.names().forEach { name ->
-                if (!name.equals("Host", ignoreCase = true)) {
-                    headers[name]?.let { reqBuilder.header(name, it) }
+            try {
+                val reqBuilder = Request.Builder().url(url)
+                headers.names().forEach { name ->
+                    if (!name.equals("Host", ignoreCase = true)) {
+                        headers[name]?.let { reqBuilder.header(name, it) }
+                    }
                 }
-            }
-            val cookies = CookieManager.getInstance().getCookie(url)
-            if (!cookies.isNullOrBlank()) {
-                reqBuilder.header("Cookie", cookies)
-            }
-            val response = httpClient.newCall(reqBuilder.build()).execute()
-            val bytes = response.body.bytes()
+                val cookies = CookieManager.getInstance().getCookie(url)
+                if (!cookies.isNullOrBlank()) {
+                    reqBuilder.header("Cookie", cookies)
+                }
+                val response = httpClient.newCall(reqBuilder.build()).execute()
+                Log.d(TAG, "Segment ${response.code}: $url")
 
-            val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
-                bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
-            } else {
-                bytes
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Segment failed ${response.code}: ${response.body.string().take(200)}")
+                    writeHttp(output, 502, "text/plain", "Upstream error".toByteArray())
+                    return
+                }
+                val bytes = response.body.bytes()
+                Log.d(TAG, "Segment size: ${bytes.size}, first4: ${bytes.take(4).map { it.toInt() and 0xFF }}")
+
+                val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
+                    bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+                } else {
+                    bytes
+                }
+                writeHttp(output, 200, "video/mp2t", result)
+            } catch (e: Exception) {
+                Log.e(TAG, "Segment exception: ${e.message}", e)
+                writeHttp(output, 502, "text/plain", "Error".toByteArray())
             }
-            writeHttp(output, 200, "video/mp2t", result)
         }
 
         private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
@@ -214,11 +243,12 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         if (!el) { __BRIDGE__.onError('no data-obf'); return; }
         var decoded = JSON.parse(atob(el.getAttribute('data-obf')));
         var m3u8Url = window.location.origin + '/' + decoded.sUb + '.m3u8';
+        var baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
         fetch(m3u8Url).then(function(r) {
             if (!r.ok) { __BRIDGE__.onError('fetch ' + r.status); return; }
             return r.text();
         }).then(function(text) {
-            if (text) __BRIDGE__.onM3u8(text);
+            if (text) __BRIDGE__.onM3u8(text, baseUrl);
         }).catch(function(e) {
             __BRIDGE__.onError(e.toString());
         });
