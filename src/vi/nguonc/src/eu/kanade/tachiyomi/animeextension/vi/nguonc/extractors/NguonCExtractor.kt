@@ -58,7 +58,9 @@ class NguonCExtractor(private val client: OkHttpClient) {
                     try {
                         val conn = ss.accept()
                         Thread { handleConnection(conn) }.start()
-                    } catch (_: Exception) { break }
+                    } catch (_: Exception) {
+                        break
+                    }
                 }
             }, "NguonC-Proxy").start()
         }
@@ -72,7 +74,9 @@ class NguonCExtractor(private val client: OkHttpClient) {
                 servePlaylist(socket.getOutputStream())
             } catch (_: Exception) {
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                try {
+                    socket.close()
+                } catch (_: Exception) {}
             }
         }
 
