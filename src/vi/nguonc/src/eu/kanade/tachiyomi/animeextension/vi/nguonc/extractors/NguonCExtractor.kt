@@ -169,7 +169,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     // Bridge for fetching segments via WebView JS. Serializes fetches with a lock.
     class SegmentFetcher {
-        private val lock = Object()
+        private val lock = Any()
 
         @Volatile var bridgeName: String? = null
 
