@@ -84,15 +84,13 @@ class HentaiZExtractor(
         return videos
     }
 
-    private fun rewritePlaylist(playlist: String, baseSegUrl: String, proxyPort: Int): String {
-        return playlist.lines().joinToString("\n") { line ->
-            val trimmed = line.trim()
-            if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                val fullUrl = baseSegUrl + trimmed
-                "http://127.0.0.1:$proxyPort/seg?u=${URLEncoder.encode(fullUrl, "UTF-8")}"
-            } else {
-                line
-            }
+    private fun rewritePlaylist(playlist: String, baseSegUrl: String, proxyPort: Int): String = playlist.lines().joinToString("\n") { line ->
+        val trimmed = line.trim()
+        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+            val fullUrl = baseSegUrl + trimmed
+            "http://127.0.0.1:$proxyPort/seg?u=${URLEncoder.encode(fullUrl, "UTF-8")}"
+        } else {
+            line
         }
     }
 
@@ -190,7 +188,9 @@ class HentaiZExtractor(
                     try {
                         val conn = ss.accept()
                         Thread { handleConnection(conn) }.start()
-                    } catch (_: Exception) { break }
+                    } catch (_: Exception) {
+                        break
+                    }
                 }
             }, "HTZ-ProxyAccept").start()
             return ss.localPort
@@ -213,7 +213,9 @@ class HentaiZExtractor(
                 }
             } catch (_: Exception) {
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                try {
+                    socket.close()
+                } catch (_: Exception) {}
             }
         }
 
@@ -261,11 +263,10 @@ class HentaiZExtractor(
             output.flush()
         }
 
-        private fun isPng(bytes: ByteArray): Boolean =
-            bytes[0] == 0x89.toByte() &&
-                bytes[1] == 0x50.toByte() &&
-                bytes[2] == 0x4E.toByte() &&
-                bytes[3] == 0x47.toByte()
+        private fun isPng(bytes: ByteArray): Boolean = bytes[0] == 0x89.toByte() &&
+            bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() &&
+            bytes[3] == 0x47.toByte()
     }
 
     companion object {

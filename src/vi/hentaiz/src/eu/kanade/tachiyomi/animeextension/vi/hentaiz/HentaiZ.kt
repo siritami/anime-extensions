@@ -58,8 +58,7 @@ class HentaiZ :
             }
         }
 
-    private fun removeWebViewToken(userAgent: String): String =
-        userAgent.replace(WEBVIEW_TOKEN_REGEX, ")")
+    private fun removeWebViewToken(userAgent: String): String = userAgent.replace(WEBVIEW_TOKEN_REGEX, ")")
 
     // ============================== Popular ===============================
 
@@ -77,9 +76,7 @@ class HentaiZ :
         return GET(url, headers)
     }
 
-    override fun popularAnimeParse(response: Response): AnimesPage {
-        return parseBrowsePage(response)
-    }
+    override fun popularAnimeParse(response: Response): AnimesPage = parseBrowsePage(response)
 
     // ============================== Latest ================================
 
@@ -97,9 +94,7 @@ class HentaiZ :
         return GET(url, headers)
     }
 
-    override fun latestUpdatesParse(response: Response): AnimesPage {
-        return parseBrowsePage(response)
-    }
+    override fun latestUpdatesParse(response: Response): AnimesPage = parseBrowsePage(response)
 
     // ============================== Search ================================
 
@@ -121,13 +116,9 @@ class HentaiZ :
         return GET(url, headers)
     }
 
-    override fun searchAnimeParse(response: Response): AnimesPage {
-        return parseBrowsePage(response)
-    }
+    override fun searchAnimeParse(response: Response): AnimesPage = parseBrowsePage(response)
 
-    override fun getFilterList(): AnimeFilterList {
-        return HentaiZFilters.buildFilterList(genreCache, studioCache)
-    }
+    override fun getFilterList(): AnimeFilterList = HentaiZFilters.buildFilterList(genreCache, studioCache)
 
     // ============================== Details ===============================
 

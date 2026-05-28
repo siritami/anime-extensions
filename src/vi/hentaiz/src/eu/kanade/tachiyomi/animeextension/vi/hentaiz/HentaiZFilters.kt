@@ -15,67 +15,74 @@ object HentaiZFilters {
 
     class CheckboxFilter(name: String, val value: String) : AnimeFilter.CheckBox(name, false)
 
-    class CheckboxGroup(name: String, val filters: List<CheckboxFilter>) :
-        AnimeFilter.Group<CheckboxFilter>(name, filters) {
+    class CheckboxGroup(name: String, val filters: List<CheckboxFilter>) : AnimeFilter.Group<CheckboxFilter>(name, filters) {
         val checked get() = filters.filter { it.state }.map { it.value }
     }
 
-    class SortFilter : SelectFilter(
-        "Sắp xếp",
-        listOf(
-            "Mới nhất" to "publishedAt_desc",
-            "Xem nhiều" to "views_desc",
-            "Tên A-Z" to "title_asc",
-        ),
-    )
+    class SortFilter :
+        SelectFilter(
+            "Sắp xếp",
+            listOf(
+                "Mới nhất" to "publishedAt_desc",
+                "Xem nhiều" to "views_desc",
+                "Tên A-Z" to "title_asc",
+            ),
+        )
 
-    class AnimationTypeFilter : SelectFilter(
-        "Loại phim",
-        listOf(
-            "Tất cả" to "ALL",
-            "Hentai 2D" to "TWO_D",
-            "Hentai 3D" to "THREE_D",
-            "Hentai Motion" to "MOTION",
-        ),
-    )
+    class AnimationTypeFilter :
+        SelectFilter(
+            "Loại phim",
+            listOf(
+                "Tất cả" to "ALL",
+                "Hentai 2D" to "TWO_D",
+                "Hentai 3D" to "THREE_D",
+                "Hentai Motion" to "MOTION",
+            ),
+        )
 
-    class ContentRatingFilter : SelectFilter(
-        "Kiểm duyệt",
-        listOf(
-            "Tất cả" to "ALL",
-            "Có che" to "CENSORED",
-            "Không che" to "UNCENSORED",
-        ),
-    )
+    class ContentRatingFilter :
+        SelectFilter(
+            "Kiểm duyệt",
+            listOf(
+                "Tất cả" to "ALL",
+                "Có che" to "CENSORED",
+                "Không che" to "UNCENSORED",
+            ),
+        )
 
-    class ContentTypeFilter : SelectFilter(
-        "Loại nội dung",
-        listOf(
-            "Tất cả" to "ALL",
-            "Phim đầy đủ" to "false",
-            "Trailer" to "true",
-        ),
-    )
+    class ContentTypeFilter :
+        SelectFilter(
+            "Loại nội dung",
+            listOf(
+                "Tất cả" to "ALL",
+                "Phim đầy đủ" to "false",
+                "Trailer" to "true",
+            ),
+        )
 
-    class YearFilter : SelectFilter(
-        "Năm",
-        listOf("Tất cả" to "ALL") + (2026 downTo 1994).map { it.toString() to it.toString() },
-    )
+    class YearFilter :
+        SelectFilter(
+            "Năm",
+            listOf("Tất cả" to "ALL") + (2026 downTo 1994).map { it.toString() to it.toString() },
+        )
 
-    class GenreFilter(genres: List<Pair<String, String>>) : CheckboxGroup(
-        "Thể loại",
-        genres.map { CheckboxFilter(it.first, it.second) },
-    )
+    class GenreFilter(genres: List<Pair<String, String>>) :
+        CheckboxGroup(
+            "Thể loại",
+            genres.map { CheckboxFilter(it.first, it.second) },
+        )
 
-    class ExcludeGenreFilter(genres: List<Pair<String, String>>) : CheckboxGroup(
-        "Loại trừ thể loại",
-        genres.map { CheckboxFilter(it.first, it.second) },
-    )
+    class ExcludeGenreFilter(genres: List<Pair<String, String>>) :
+        CheckboxGroup(
+            "Loại trừ thể loại",
+            genres.map { CheckboxFilter(it.first, it.second) },
+        )
 
-    class StudioFilter(studios: List<Pair<String, String>>) : SelectFilter(
-        "Hãng phim",
-        listOf("Tất cả" to "ALL") + studios,
-    )
+    class StudioFilter(studios: List<Pair<String, String>>) :
+        SelectFilter(
+            "Hãng phim",
+            listOf("Tất cả" to "ALL") + studios,
+        )
 
     fun buildFilterList(
         genres: List<Pair<String, String>>,
