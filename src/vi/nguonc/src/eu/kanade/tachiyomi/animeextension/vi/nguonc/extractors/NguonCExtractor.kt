@@ -28,6 +28,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
     private val handler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var proxy: HlsProxyServer? = null
+
     @Volatile private var activeWebView: WebView? = null
     private val segFetcher = SegmentFetcher()
 
@@ -134,8 +135,11 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         private val lock = Object()
 
         @Volatile var bridgeName: String? = null
+
         @Volatile private var segmentData: ByteArray? = null
+
         @Volatile private var segmentError: String? = null
+
         @Volatile private var segmentLatch: CountDownLatch? = null
 
         @JavascriptInterface
@@ -245,7 +249,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 }
             } catch (_: Exception) {
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                try {
+                    socket.close()
+                } catch (_: Exception) {}
             }
         }
 
