@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.Serializable
 import okhttp3.FormBody
 import okhttp3.Request
 import okhttp3.Response
@@ -193,3 +194,8 @@ class VLXX :
         private val IFRAME_SRC_REGEX = Regex("""src="([^"]+)""")
     }
 }
+
+@Serializable
+class ServerResponse(
+    val player: String? = null,
+)
