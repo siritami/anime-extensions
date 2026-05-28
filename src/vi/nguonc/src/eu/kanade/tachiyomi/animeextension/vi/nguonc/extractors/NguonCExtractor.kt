@@ -86,27 +86,8 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         Log.e(TAG, "m3u8 base: $baseUrl")
         Log.e(TAG, "m3u8 first 300: ${m3u8Content.take(300)}")
 
-        // Navigate WebView to CDN origin so segment fetches are same-origin (bypass CORS)
-        val cdnOrigin = extractCdnOrigin(m3u8Content, baseUrl)
-        if (cdnOrigin != null) {
-            Log.e(TAG, "Switching WebView origin to: $cdnOrigin")
-            val navLatch = CountDownLatch(1)
-            handler.post {
-                activeWebView?.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        navLatch.countDown()
-                    }
-                }
-                activeWebView?.loadDataWithBaseURL(
-                    cdnOrigin,
-                    "<html></html>",
-                    "text/html",
-                    "UTF-8",
-                    null,
-                )
-            }
-            navLatch.await(5, TimeUnit.SECONDS)
-        }
+        // Stay on embed page — cross-origin fetch will send correct Origin/Referer headers
+        // that the CDN expects (same as the page's own HLS player would)
 
         val server = ensureProxyRunning()
         server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
@@ -129,21 +110,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
         Log.e(TAG, "fetchSegment: $url")
         return segFetcher.fetch(url, bridge, wv, handler)
-    }
-
-    private fun extractCdnOrigin(m3u8: String, baseUrl: String): String? {
-        val firstSeg = m3u8.lines().firstOrNull {
-            it.isNotBlank() && !it.startsWith("#")
-        }?.trim() ?: return null
-        val url = when {
-            firstSeg.startsWith("http") -> firstSeg
-            firstSeg.startsWith("/") -> baseUrl.split("/").take(3).joinToString("/") + firstSeg
-            else -> baseUrl + firstSeg
-        }
-        val origin = url.split("/").take(3).joinToString("/")
-        // Only switch if it's a different origin
-        val embedOrigin = baseUrl.split("/").take(3).joinToString("/")
-        return if (origin != embedOrigin) origin else null
     }
 
     private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String = m3u8.lines().joinToString("\n") { line ->
