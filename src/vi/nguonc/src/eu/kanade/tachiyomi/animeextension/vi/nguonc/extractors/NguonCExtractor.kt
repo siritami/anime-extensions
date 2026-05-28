@@ -5,7 +5,6 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
-import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -38,14 +37,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val segBridgeName = generateBridgeName()
         val script = EXTRACT_SCRIPT_TEMPLATE.replace("__BRIDGE__", bridgeName)
 
-        // Store segment bridge name for fetch scripts
         segFetcher.bridgeName = segBridgeName
-
-        // Abort any pending segment fetches from previous video
         segFetcher.abort()
 
         handler.post {
-            // Destroy previous WebView if any
             activeWebView?.let {
                 it.stopLoading()
                 it.destroy()
@@ -84,14 +79,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         val baseUrl = bridge.m3u8BaseUrl ?: ""
-        Log.e(TAG, "m3u8 base: $baseUrl")
-        Log.e(TAG, "m3u8 first 300: ${m3u8Content.take(300)}")
-        Log.e(TAG, "m3u8 last 200: ${m3u8Content.takeLast(200)}")
-
-        // Stay on embed page — cross-origin fetch will send correct Origin/Referer headers
-        // that the CDN expects (same as the page's own HLS player would)
-
-        // Parse segment URLs from m3u8
         val segmentUrls = mutableListOf<String>()
         val lines = m3u8Content.lines()
         for (line in lines) {
@@ -108,13 +95,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 segmentUrls.add(url)
             }
         }
-        Log.e(TAG, "Total segments: ${segmentUrls.size}")
-
         val server = ensureProxyRunning()
         server.reset()
         server.segmentUrls = segmentUrls
 
-        // Build rewritten m3u8 playlist
         var segIdx = 0
         val rewritten = buildString {
             for (line in lines) {
@@ -131,7 +115,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
         server.cachedPlaylist = rewritten
 
-        // Pre-fetch first segment so HLS probe is instant
         Thread {
             val bytes = fetchSegment(segmentUrls[0])
             if (bytes != null) {
@@ -141,7 +124,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     bytes
                 }
                 server.segmentCache[0] = result
-                Log.e(TAG, "Pre-fetched seg 0: ${result.size} bytes")
             }
         }.start()
 
@@ -149,19 +131,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return listOf(Video(proxyUrl, "Video", proxyUrl))
     }
 
-    // Fetch a segment via the active WebView's fetch() API (bypasses TLS fingerprinting)
     fun fetchSegment(url: String): ByteArray? {
-        val wv = activeWebView
-        if (wv == null) {
-            Log.e(TAG, "fetchSegment: activeWebView is null")
-            return null
-        }
-        val bridge = segFetcher.bridgeName
-        if (bridge == null) {
-            Log.e(TAG, "fetchSegment: bridgeName is null")
-            return null
-        }
-        Log.e(TAG, "fetchSegment: $url")
+        val wv = activeWebView ?: return null
+        val bridge = segFetcher.bridgeName ?: return null
         return segFetcher.fetch(url, bridge, wv, handler)
     }
 
@@ -182,7 +154,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return server
     }
 
-    // Bridge for fetching segments via WebView JS. Serializes fetches with a lock.
     class SegmentFetcher {
         private val lock = Any()
 
@@ -209,7 +180,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         @JavascriptInterface
         fun onSegmentError(msg: String) {
-            Log.e(TAG, "Segment fetch error: $msg")
             segmentError = msg
             segmentLatch?.countDown()
         }
@@ -248,9 +218,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     webView.evaluateJavascript(script, null)
                 }
 
-                val completed = latch.await(SEGMENT_TIMEOUT_SEC, TimeUnit.SECONDS)
-                if (!completed) Log.e(TAG, "Segment fetch timed out: $url")
-                if (segmentError != null) Log.e(TAG, "Segment error for: $url -> $segmentError")
+                latch.await(SEGMENT_TIMEOUT_SEC, TimeUnit.SECONDS)
                 return segmentData
             }
         }
@@ -269,8 +237,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         @JavascriptInterface
-        fun onError(msg: String) {
-            Log.e(TAG, "JS error: $msg")
+        fun onError(@Suppress("UNUSED_PARAMETER") msg: String) {
             latch.countDown()
         }
     }
@@ -283,7 +250,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         @Volatile var cachedPlaylist: String? = null
         val segmentCache = java.util.concurrent.ConcurrentHashMap<Int, ByteArray>()
 
-        // Cached PAT+PMT header extracted from first segment
         @Volatile private var tsHeader: ByteArray? = null
 
         val port: Int get() = serverSocket?.localPort ?: 0
@@ -293,7 +259,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             segmentCache.clear()
             tsHeader = null
             cachedPlaylist = null
-            Log.e(TAG, "Proxy state reset")
         }
 
         fun start() {
@@ -316,7 +281,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 socket.soTimeout = 60_000
                 val input = socket.getInputStream().bufferedReader()
                 val requestLine = input.readLine() ?: return
-                Log.e(TAG, "Proxy request: $requestLine")
                 while (input.readLine()?.isEmpty() == false) { /* consume headers */ }
 
                 val path = requestLine.split(" ").getOrNull(1) ?: return
@@ -342,7 +306,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         private fun serveSegment(path: String, output: OutputStream) {
-            // Path format: /seg/{index}.ts
             val idx = path.removePrefix("/seg/").removeSuffix(".ts").toIntOrNull()
             if (idx == null || idx < 0 || idx >= segmentUrls.size) {
                 writeHttp(output, 404, "text/plain", "Invalid segment".toByteArray())
@@ -350,7 +313,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             }
 
             try {
-                // Check cache first
                 var data = segmentCache[idx]
                 if (data == null) {
                     val url = segmentUrls[idx]
@@ -367,12 +329,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     segmentCache[idx] = data
                 }
 
-                // Extract and cache TS header (PAT+PMT) from first segment
                 if (tsHeader == null && data.size > 188) {
                     tsHeader = extractTsHeader(data)
                 }
 
-                // Prepend PAT+PMT so ffmpeg's inner demuxer finds streams immediately
                 val header = tsHeader
                 val body = if (header != null && !startsWithPat(data)) {
                     header + data
@@ -380,10 +340,8 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     data
                 }
 
-                Log.e(TAG, "Serve seg $idx size=${body.size}")
                 writeHttp(output, 200, "video/mp2t", body)
 
-                // Pre-fetch next segment in background
                 if (idx + 1 < segmentUrls.size && !segmentCache.containsKey(idx + 1)) {
                     Thread {
                         try {
@@ -401,15 +359,12 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     }.start()
                 }
 
-                // Evict old cache entries to save memory
                 if (idx > 3) segmentCache.remove(idx - 3)
-            } catch (e: Exception) {
-                Log.e(TAG, "Segment $idx exception: ${e.message}")
+            } catch (_: Exception) {
                 writeHttp(output, 502, "text/plain", "Error".toByteArray())
             }
         }
 
-        // Extract PAT + PMT packets from TS data
         private fun extractTsHeader(data: ByteArray): ByteArray? {
             var patPacket: ByteArray? = null
             var pmtPid = -1
@@ -422,7 +377,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 val pid = ((data[offset + 1].toInt() and 0x1F) shl 8) or (data[offset + 2].toInt() and 0xFF)
                 if (pid == 0 && patPacket == null) {
                     patPacket = data.copyOfRange(offset, offset + 188)
-                    // Parse PMT PID from PAT payload
                     val adaptFlag = (data[offset + 3].toInt() shr 4) and 0x03
                     var payloadStart = offset + 4
                     if (adaptFlag and 0x02 != 0) {
@@ -432,7 +386,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     if (pusi && payloadStart < offset + 188) {
                         payloadStart += 1 + (data[payloadStart].toInt() and 0xFF)
                     }
-                    // PAT table: skip table header (8 bytes), read program entries
                     val tableStart = payloadStart
                     if (tableStart + 12 < offset + 188) {
                         val sectionLen = ((data[tableStart + 1].toInt() and 0x0F) shl 8) or (data[tableStart + 2].toInt() and 0xFF)
@@ -440,20 +393,15 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                         val programEnd = tableStart + 3 + sectionLen - 4
                         if (programStart + 4 <= minOf(programEnd, offset + 188)) {
                             pmtPid = ((data[programStart + 2].toInt() and 0x1F) shl 8) or (data[programStart + 3].toInt() and 0xFF)
-                            Log.e(TAG, "PAT found at pkt $i, PMT PID=$pmtPid")
                         }
                     }
                 }
                 if (pmtPid > 0 && pid == pmtPid && pmtPacket == null) {
                     pmtPacket = data.copyOfRange(offset, offset + 188)
-                    Log.e(TAG, "PMT found at pkt $i")
                     break
                 }
             }
-            if (patPacket == null) {
-                Log.e(TAG, "No PAT found in first 200 packets!")
-                return null
-            }
+            if (patPacket == null) return null
             return if (pmtPacket != null) patPacket + pmtPacket else patPacket
         }
 
@@ -477,7 +425,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
     }
 
     companion object {
-        private const val TAG = "NguonCExtractor"
         private const val TIMEOUT_SEC = 15L
         private const val SEGMENT_TIMEOUT_SEC = 30L
         private const val PNG_HEADER_SIZE = 127

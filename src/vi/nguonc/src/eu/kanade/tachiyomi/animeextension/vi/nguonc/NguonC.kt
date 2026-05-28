@@ -197,7 +197,7 @@ class NguonC :
             }
         }
 
-        val hasNext = document.selectFirst("a:contains(Sau)") != null
+        val hasNext = document.selectFirst("a[rel=next]") != null
 
         return AnimesPage(animes, hasNext)
     }
