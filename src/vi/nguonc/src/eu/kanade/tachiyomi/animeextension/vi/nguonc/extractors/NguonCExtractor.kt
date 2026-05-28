@@ -117,7 +117,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 val trimmed = line.trim()
                 if (trimmed.equals("#EXT-X-DISCONTINUITY", ignoreCase = true)) continue
                 if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                    appendLine("http://127.0.0.1:${server.port}/seg/${segIdx}.ts")
+                    appendLine("http://127.0.0.1:${server.port}/seg/$segIdx.ts")
                     segIdx++
                 } else {
                     appendLine(line)
@@ -133,7 +133,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             if (bytes != null) {
                 val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                     bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
-                } else bytes
+                } else {
+                    bytes
+                }
                 server.segmentCache[0] = result
                 Log.e(TAG, "Pre-fetched seg 0: ${result.size} bytes")
             }
@@ -262,8 +264,10 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         private var serverSocket: ServerSocket? = null
 
         @Volatile var segmentUrls: List<String> = emptyList()
+
         @Volatile var cachedPlaylist: String? = null
         val segmentCache = java.util.concurrent.ConcurrentHashMap<Int, ByteArray>()
+
         // Cached PAT+PMT header extracted from first segment
         @Volatile private var tsHeader: ByteArray? = null
 
@@ -335,7 +339,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                     }
                     data = if (bytes.size > PNG_HEADER_SIZE && extractor.isPng(bytes)) {
                         bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
-                    } else bytes
+                    } else {
+                        bytes
+                    }
                     segmentCache[idx] = data
                 }
 
@@ -364,7 +370,9 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                             if (nextBytes != null) {
                                 val result = if (nextBytes.size > PNG_HEADER_SIZE && extractor.isPng(nextBytes)) {
                                     nextBytes.copyOfRange(PNG_HEADER_SIZE, nextBytes.size)
-                                } else nextBytes
+                                } else {
+                                    nextBytes
+                                }
                                 segmentCache[idx + 1] = result
                             }
                         } catch (_: Exception) {}
