@@ -85,6 +85,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         val baseUrl = bridge.m3u8BaseUrl ?: ""
         Log.e(TAG, "m3u8 base: $baseUrl")
         Log.e(TAG, "m3u8 first 300: ${m3u8Content.take(300)}")
+        Log.e(TAG, "m3u8 last 200: ${m3u8Content.takeLast(200)}")
 
         // Stay on embed page — cross-origin fetch will send correct Origin/Referer headers
         // that the CDN expects (same as the page's own HLS player would)
@@ -113,20 +114,30 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return segFetcher.fetch(url, bridge, wv, handler)
     }
 
-    private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String = m3u8.lines().joinToString("\n") { line ->
-        val trimmed = line.trim()
-        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-            val absoluteUrl = when {
-                trimmed.startsWith("http") -> trimmed
-                trimmed.startsWith("/") -> {
-                    val origin = baseUrl.split("/").take(3).joinToString("/")
-                    "$origin$trimmed"
+    private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String {
+        val rewritten = m3u8.lines()
+            .filter { !it.trim().equals("#EXT-X-DISCONTINUITY", ignoreCase = true) }
+            .joinToString("\n") { line ->
+                val trimmed = line.trim()
+                if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                    val absoluteUrl = when {
+                        trimmed.startsWith("http") -> trimmed
+                        trimmed.startsWith("/") -> {
+                            val origin = baseUrl.split("/").take(3).joinToString("/")
+                            "$origin$trimmed"
+                        }
+                        else -> "$baseUrl$trimmed"
+                    }
+                    "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(absoluteUrl, "UTF-8")}"
+                } else {
+                    line
                 }
-                else -> "$baseUrl$trimmed"
             }
-            "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(absoluteUrl, "UTF-8")}"
+        // Ensure playlist ends with #EXT-X-ENDLIST
+        return if (!rewritten.contains("#EXT-X-ENDLIST")) {
+            "$rewritten\n#EXT-X-ENDLIST\n"
         } else {
-            line
+            rewritten
         }
     }
 
@@ -252,6 +263,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 socket.soTimeout = 60_000
                 val input = socket.getInputStream().bufferedReader()
                 val requestLine = input.readLine() ?: return
+                Log.e(TAG, "Proxy request: $requestLine")
                 while (input.readLine()?.isEmpty() == false) { /* consume headers */ }
 
                 val path = requestLine.split(" ").getOrNull(1) ?: return
@@ -313,6 +325,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             val header = "HTTP/1.1 $code $status\r\n" +
                 "Content-Type: $contentType\r\n" +
                 "Content-Length: ${body.size}\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
                 "Connection: close\r\n\r\n"
             output.write(header.toByteArray())
             output.write(body)
