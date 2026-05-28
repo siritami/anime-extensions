@@ -18,7 +18,6 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
-import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -90,12 +89,29 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         // Stay on embed page — cross-origin fetch will send correct Origin/Referer headers
         // that the CDN expects (same as the page's own HLS player would)
 
-        val server = ensureProxyRunning()
-        server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
-        Log.e(TAG, "Rewritten playlist first 500: ${server.cachedPlaylist?.take(500)}")
+        // Parse segment URLs from m3u8
+        val segmentUrls = m3u8Content.lines().mapNotNull { line ->
+            val trimmed = line.trim()
+            if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                when {
+                    trimmed.startsWith("http") -> trimmed
+                    trimmed.startsWith("/") -> {
+                        val origin = baseUrl.split("/").take(3).joinToString("/")
+                        "$origin$trimmed"
+                    }
+                    else -> "$baseUrl$trimmed"
+                }
+            } else {
+                null
+            }
+        }
+        Log.e(TAG, "Total segments: ${segmentUrls.size}")
 
-        val proxyUrl = "http://127.0.0.1:${server.port}/playlist.m3u8"
-        return listOf(Video(proxyUrl, "Video", proxyUrl))
+        val server = ensureProxyRunning()
+        server.segmentUrls = segmentUrls
+
+        val streamUrl = "http://127.0.0.1:${server.port}/stream.ts"
+        return listOf(Video(streamUrl, "Video", streamUrl))
     }
 
     // Fetch a segment via the active WebView's fetch() API (bypasses TLS fingerprinting)
@@ -114,32 +130,6 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return segFetcher.fetch(url, bridge, wv, handler)
     }
 
-    private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String {
-        val rewritten = m3u8.lines()
-            .filter { !it.trim().equals("#EXT-X-DISCONTINUITY", ignoreCase = true) }
-            .joinToString("\n") { line ->
-                val trimmed = line.trim()
-                if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                    val absoluteUrl = when {
-                        trimmed.startsWith("http") -> trimmed
-                        trimmed.startsWith("/") -> {
-                            val origin = baseUrl.split("/").take(3).joinToString("/")
-                            "$origin$trimmed"
-                        }
-                        else -> "$baseUrl$trimmed"
-                    }
-                    "http://127.0.0.1:$port/seg?u=${URLEncoder.encode(absoluteUrl, "UTF-8")}"
-                } else {
-                    line
-                }
-            }
-        // Ensure playlist ends with #EXT-X-ENDLIST
-        return if (!rewritten.contains("#EXT-X-ENDLIST")) {
-            "$rewritten\n#EXT-X-ENDLIST\n"
-        } else {
-            rewritten
-        }
-    }
 
     private fun generateBridgeName(): String {
         val pool = ('a'..'z') + ('A'..'Z')
@@ -239,7 +229,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
     private class HlsProxyServer(private val extractor: NguonCExtractor) {
         private var serverSocket: ServerSocket? = null
 
-        @Volatile var cachedPlaylist: String? = null
+        @Volatile var segmentUrls: List<String> = emptyList()
         val port: Int get() = serverSocket?.localPort ?: 0
         val isClosed: Boolean get() = serverSocket?.isClosed != false
 
@@ -270,7 +260,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 val output = socket.getOutputStream()
 
                 when {
-                    path == "/playlist.m3u8" -> servePlaylist(output)
+                    path.startsWith("/stream") -> serveStream(socket, output)
                     path.startsWith("/seg?u=") -> serveSegment(path, output)
                     else -> writeHttp(output, 404, "text/plain", "Not Found".toByteArray())
                 }
@@ -282,32 +272,51 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             }
         }
 
-        private fun servePlaylist(output: OutputStream) {
-            val body = (cachedPlaylist ?: "#EXTM3U\n").toByteArray()
-            writeHttp(output, 200, "application/vnd.apple.mpegurl", body)
+        // Stream all segments as a single continuous TS stream
+        private fun serveStream(socket: Socket, output: OutputStream) {
+            socket.soTimeout = 0
+            val header = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: video/mp2t\r\n" +
+                "Connection: close\r\n\r\n"
+            output.write(header.toByteArray())
+            output.flush()
+
+            val urls = segmentUrls
+            Log.e(TAG, "Streaming ${urls.size} segments")
+            for ((idx, url) in urls.withIndex()) {
+                try {
+                    val bytes = extractor.fetchSegment(url)
+                    if (bytes == null) {
+                        Log.e(TAG, "Stream seg $idx null: $url")
+                        continue
+                    }
+                    val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
+                        bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
+                    } else {
+                        bytes
+                    }
+                    output.write(result)
+                    output.flush()
+                    if (idx < 3 || idx % 50 == 0) {
+                        Log.e(TAG, "Stream seg $idx OK size=${result.size}")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Stream seg $idx error: ${e.message}")
+                    break
+                }
+            }
+            Log.e(TAG, "Stream complete")
         }
 
         private fun serveSegment(path: String, output: OutputStream) {
             val encodedUrl = path.substringAfter("u=")
             val url = URLDecoder.decode(encodedUrl, "UTF-8")
-
             try {
                 val bytes = extractor.fetchSegment(url)
                 if (bytes == null) {
-                    Log.e(TAG, "Segment fetch returned null: $url")
                     writeHttp(output, 502, "text/plain", "Fetch failed".toByteArray())
                     return
                 }
-
-                Log.e(TAG, "Segment OK size=${bytes.size} first8=${bytes.take(8).map { it.toInt() and 0xFF }}")
-                // Verify TS alignment: check sync bytes at 0, 188, 376
-                if (bytes.size > 376) {
-                    val b0 = bytes[0].toInt() and 0xFF
-                    val b188 = bytes[188].toInt() and 0xFF
-                    val b376 = bytes[376].toInt() and 0xFF
-                    Log.e(TAG, "TS sync check: [0]=0x${"%02X".format(b0)} [188]=0x${"%02X".format(b188)} [376]=0x${"%02X".format(b376)} valid=${b0 == 0x47 && b188 == 0x47 && b376 == 0x47}")
-                }
-
                 val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                     bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
                 } else {
