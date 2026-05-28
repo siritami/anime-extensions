@@ -1,0 +1,7 @@
+ext {
+    extName = 'HentaiZ'
+    extClass = '.HentaiZ'
+    extVersionCode = 1
+}
+
+apply plugin: "kei.plugins.extension.legacy"
