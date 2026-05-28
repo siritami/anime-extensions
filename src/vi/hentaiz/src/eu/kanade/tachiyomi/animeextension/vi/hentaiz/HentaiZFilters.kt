@@ -15,7 +15,7 @@ object HentaiZFilters {
 
     class CheckboxFilter(name: String, val value: String) : AnimeFilter.CheckBox(name, false)
 
-    class CheckboxGroup(name: String, val filters: List<CheckboxFilter>) : AnimeFilter.Group<CheckboxFilter>(name, filters) {
+    open class CheckboxGroup(name: String, val filters: List<CheckboxFilter>) : AnimeFilter.Group<CheckboxFilter>(name, filters) {
         val checked get() = filters.filter { it.state }.map { it.value }
     }
 
