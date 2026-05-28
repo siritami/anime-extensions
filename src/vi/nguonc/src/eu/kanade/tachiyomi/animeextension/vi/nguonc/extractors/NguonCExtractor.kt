@@ -4,15 +4,14 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
-import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.animesource.model.Video
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import uy.kohesive.injekt.injectLazy
 import java.io.OutputStream
 import java.net.InetAddress
@@ -29,18 +28,29 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
     private val handler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var proxy: HlsProxyServer? = null
+    @Volatile private var activeWebView: WebView? = null
+    private val segFetcher = SegmentFetcher()
 
     @SuppressLint("SetJavaScriptEnabled")
     fun videosFromUrl(embedUrl: String): List<Video> {
         val latch = CountDownLatch(1)
         val bridge = JsBridge(latch)
         val bridgeName = generateBridgeName()
+        val segBridgeName = generateBridgeName()
         val script = EXTRACT_SCRIPT_TEMPLATE.replace("__BRIDGE__", bridgeName)
-        var webView: WebView? = null
+
+        // Store segment bridge name for fetch scripts
+        segFetcher.bridgeName = segBridgeName
 
         handler.post {
+            // Destroy previous WebView if any
+            activeWebView?.let {
+                it.stopLoading()
+                it.destroy()
+            }
+
             val wv = WebView(context)
-            webView = wv
+            activeWebView = wv
 
             with(wv.settings) {
                 javaScriptEnabled = true
@@ -49,6 +59,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             }
 
             wv.addJavascriptInterface(bridge, bridgeName)
+            wv.addJavascriptInterface(segFetcher, segBridgeName)
             wv.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     view?.evaluateJavascript(script, null)
@@ -60,17 +71,18 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
         latch.await(TIMEOUT_SEC, TimeUnit.SECONDS)
 
-        handler.post {
-            webView?.stopLoading()
-            webView?.destroy()
-            webView = null
+        val m3u8Content = bridge.m3u8Content
+        if (m3u8Content == null) {
+            handler.post {
+                activeWebView?.stopLoading()
+                activeWebView?.destroy()
+                activeWebView = null
+            }
+            return emptyList()
         }
 
-        val m3u8Content = bridge.m3u8Content ?: return emptyList()
         val baseUrl = bridge.m3u8BaseUrl ?: ""
-
         Log.d(TAG, "m3u8 base: $baseUrl")
-        Log.d(TAG, "m3u8 content (first 500): ${m3u8Content.take(500)}")
 
         val server = ensureProxyRunning()
         server.cachedPlaylist = rewriteForProxy(m3u8Content, server.port, baseUrl)
@@ -79,15 +91,21 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         return listOf(Video(proxyUrl, "Video", proxyUrl))
     }
 
+    // Fetch a segment via the active WebView's fetch() API (bypasses TLS fingerprinting)
+    fun fetchSegment(url: String): ByteArray? {
+        val wv = activeWebView ?: return null
+        val bridgeName = segFetcher.bridgeName ?: return null
+
+        return segFetcher.fetch(url, bridgeName, wv, handler)
+    }
+
     private fun rewriteForProxy(m3u8: String, port: Int, baseUrl: String): String = m3u8.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
             val absoluteUrl = when {
                 trimmed.startsWith("http") -> trimmed
                 trimmed.startsWith("/") -> {
-                    val origin = baseUrl.substringBefore("/", "").let {
-                        baseUrl.split("/").take(3).joinToString("/")
-                    }
+                    val origin = baseUrl.split("/").take(3).joinToString("/")
                     "$origin$trimmed"
                 }
                 else -> "$baseUrl$trimmed"
@@ -105,10 +123,68 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
 
     private fun ensureProxyRunning(): HlsProxyServer {
         proxy?.let { if (!it.isClosed) return it }
-        val server = HlsProxyServer(client, headers)
+        val server = HlsProxyServer(this)
         server.start()
         proxy = server
         return server
+    }
+
+    // Bridge for fetching segments via WebView JS. Serializes fetches with a lock.
+    class SegmentFetcher {
+        private val lock = Object()
+
+        @Volatile var bridgeName: String? = null
+        @Volatile private var segmentData: ByteArray? = null
+        @Volatile private var segmentError: String? = null
+        @Volatile private var segmentLatch: CountDownLatch? = null
+
+        @JavascriptInterface
+        fun onSegment(base64: String) {
+            segmentData = Base64.decode(base64, Base64.DEFAULT)
+            segmentLatch?.countDown()
+        }
+
+        @JavascriptInterface
+        fun onSegmentError(msg: String) {
+            Log.e(TAG, "Segment fetch error: $msg")
+            segmentError = msg
+            segmentLatch?.countDown()
+        }
+
+        fun fetch(url: String, bridge: String, webView: WebView, handler: Handler): ByteArray? {
+            synchronized(lock) {
+                segmentData = null
+                segmentError = null
+                val latch = CountDownLatch(1)
+                segmentLatch = latch
+
+                val escapedUrl = url.replace("\\", "\\\\").replace("'", "\\'")
+                val script = """(function() {
+                    fetch('$escapedUrl').then(function(r) {
+                        if (!r.ok) { $bridge.onSegmentError('HTTP ' + r.status); return; }
+                        return r.arrayBuffer();
+                    }).then(function(buf) {
+                        if (!buf) return;
+                        var bytes = new Uint8Array(buf);
+                        var binary = '';
+                        var chunk = 8192;
+                        for (var i = 0; i < bytes.length; i += chunk) {
+                            binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+                        }
+                        $bridge.onSegment(btoa(binary));
+                    }).catch(function(e) {
+                        $bridge.onSegmentError(e.toString());
+                    });
+                })();"""
+
+                handler.post {
+                    webView.evaluateJavascript(script, null)
+                }
+
+                latch.await(SEGMENT_TIMEOUT_SEC, TimeUnit.SECONDS)
+                return segmentData
+            }
+        }
     }
 
     private class JsBridge(private val latch: CountDownLatch) {
@@ -130,7 +206,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
     }
 
-    private class HlsProxyServer(private val httpClient: OkHttpClient, private val headers: Headers) {
+    private class HlsProxyServer(private val extractor: NguonCExtractor) {
         private var serverSocket: ServerSocket? = null
 
         @Volatile var cachedPlaylist: String? = null
@@ -169,9 +245,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
                 }
             } catch (_: Exception) {
             } finally {
-                try {
-                    socket.close()
-                } catch (_: Exception) {}
+                try { socket.close() } catch (_: Exception) {}
             }
         }
 
@@ -185,26 +259,14 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
             val url = URLDecoder.decode(encodedUrl, "UTF-8")
 
             try {
-                val reqBuilder = Request.Builder().url(url)
-                headers.names().forEach { name ->
-                    if (!name.equals("Host", ignoreCase = true)) {
-                        headers[name]?.let { reqBuilder.header(name, it) }
-                    }
-                }
-                val cookies = CookieManager.getInstance().getCookie(url)
-                if (!cookies.isNullOrBlank()) {
-                    reqBuilder.header("Cookie", cookies)
-                }
-                val response = httpClient.newCall(reqBuilder.build()).execute()
-                Log.d(TAG, "Segment ${response.code}: $url")
-
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Segment failed ${response.code}: ${response.body.string().take(200)}")
-                    writeHttp(output, 502, "text/plain", "Upstream error".toByteArray())
+                val bytes = extractor.fetchSegment(url)
+                if (bytes == null) {
+                    Log.e(TAG, "Segment fetch returned null: $url")
+                    writeHttp(output, 502, "text/plain", "Fetch failed".toByteArray())
                     return
                 }
-                val bytes = response.body.bytes()
-                Log.d(TAG, "Segment size: ${bytes.size}, first4: ${bytes.take(4).map { it.toInt() and 0xFF }}")
+
+                Log.d(TAG, "Segment OK size=${bytes.size} first4=${bytes.take(4).map { it.toInt() and 0xFF }}")
 
                 val result = if (bytes.size > PNG_HEADER_SIZE && isPng(bytes)) {
                     bytes.copyOfRange(PNG_HEADER_SIZE, bytes.size)
@@ -219,7 +281,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
         }
 
         private fun writeHttp(output: OutputStream, code: Int, contentType: String, body: ByteArray) {
-            val status = if (code == 200) "OK" else "Not Found"
+            val status = if (code == 200) "OK" else "Error"
             val header = "HTTP/1.1 $code $status\r\n" +
                 "Content-Type: $contentType\r\n" +
                 "Content-Length: ${body.size}\r\n" +
@@ -236,6 +298,7 @@ class NguonCExtractor(private val client: OkHttpClient, private val headers: Hea
     companion object {
         private const val TAG = "NguonCExtractor"
         private const val TIMEOUT_SEC = 15L
+        private const val SEGMENT_TIMEOUT_SEC = 30L
         private const val PNG_HEADER_SIZE = 127
 
         private const val EXTRACT_SCRIPT_TEMPLATE = """(function() {
