@@ -306,44 +306,44 @@ class HentaiZ :
             if (cache.containsKey(idx)) return cache[idx]
             if (idx < 0 || idx >= data.length()) return null
 
-            val val_ = data.opt(idx)
+            val entry = data.opt(idx)
             when {
-                val_ == null || val_ == JSONObject.NULL -> {
+                entry == null || entry == JSONObject.NULL -> {
                     cache[idx] = null
                     return null
                 }
-                val_ is String || val_ is Number || val_ is Boolean -> {
-                    cache[idx] = val_
-                    return val_
+                entry is String || entry is Number || entry is Boolean -> {
+                    cache[idx] = entry
+                    return entry
                 }
-                val_ is JSONArray -> {
-                    if (val_.length() == 2 && val_.opt(0) == "Date") {
-                        val d = val_.opt(1)
+                entry is JSONArray -> {
+                    if (entry.length() == 2 && entry.opt(0) == "Date") {
+                        val d = entry.opt(1)
                         cache[idx] = d
                         return d
                     }
                     val arr = JSONArray()
                     cache[idx] = arr
-                    for (i in 0 until val_.length()) {
-                        val refIdx = val_.optInt(i, -1)
+                    for (i in 0 until entry.length()) {
+                        val refIdx = entry.optInt(i, -1)
                         arr.put(resolve(refIdx))
                     }
                     return arr
                 }
-                val_ is JSONObject -> {
+                entry is JSONObject -> {
                     val obj = JSONObject()
                     cache[idx] = obj
-                    val keys = val_.keys()
+                    val keys = entry.keys()
                     while (keys.hasNext()) {
                         val key = keys.next()
-                        val refIdx = val_.optInt(key, -1)
+                        val refIdx = entry.optInt(key, -1)
                         obj.put(key, resolve(refIdx))
                     }
                     return obj
                 }
                 else -> {
-                    cache[idx] = val_
-                    return val_
+                    cache[idx] = entry
+                    return entry
                 }
             }
         }
